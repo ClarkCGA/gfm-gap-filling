@@ -384,9 +384,8 @@ def fsdp_main(args):
     os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
 
     # get input metadata
-    with open("/workspace/data/lchu/hls/meta/image_meta-hls_l30-201707_201712-mc000-ws3_224_224-st1_224_224.json") as f:
+    with open("/workspace/gfm-gap-filling/pretraining/us_sampling_v1_t134_MC.json") as f:
         input_meta_data = json.load(f)
-
     # create model
     model = MaskedAutoencoderViT(img_size=img_size, patch_size=patch_size,
                  num_frames=num_frames, tubelet_size=tubelet_size,
@@ -402,7 +401,7 @@ def fsdp_main(args):
     train_dataset = HLSDataset(train_dir, num_frames=num_frames, img_size=img_size, bands=input_meta_data['bands'],
                                random_cropping=random_cropping, remove_cloud=True, normalize=True,
                                mean=input_meta_data['image_mean'], std=input_meta_data['image_standard_deviation'],
-                               indices=[[idx[0], idx[1], idx[3], idx[2]] for idx in input_meta_data['indices']
+                               indices=[[idx[0], idx[1], idx[3], idx[2]] for idx in input_meta_data['train_indices']
                                         if idx[2] != 3584 and idx[3] != 3584])
     if rank == 0:
         print(f"--> Training set len = {len(train_dataset)}")
@@ -410,8 +409,8 @@ def fsdp_main(args):
     val_dataset = HLSDataset(val_dir, num_frames=num_frames, img_size=img_size, bands=input_meta_data['bands'],
                              random_cropping=random_cropping, remove_cloud=True, normalize=True,
                              mean=input_meta_data['image_mean'], std=input_meta_data['image_standard_deviation'],
-                             indices=[[idx[0], idx[1], idx[3], idx[2]] for idx in input_meta_data['indices']
-                                        if idx[2] != 3584 and idx[3] != 3584][:100])
+                             indices=[[idx[0], idx[1], idx[3], idx[2]] for idx in input_meta_data['val_indices']
+                                        if idx[2] != 3584 and idx[3] != 3584])
     if rank == 0:
         print(f"--> Validation set len = {len(val_dataset)}")
 
