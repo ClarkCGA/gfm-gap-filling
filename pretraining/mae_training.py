@@ -483,6 +483,7 @@ def fsdp_main(args):
 
     # -- Start Training -----
     for epoch in range(1, epochs + 1):
+        print('training ' + str(epoch) + ' rank ' + str(rank))
         if rank == 0:
             print(f"\n--> Starting Epoch {epoch}")
 
