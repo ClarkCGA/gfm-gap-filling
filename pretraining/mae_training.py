@@ -160,7 +160,7 @@ def get_args_parser():
                         help='Input image size.')
     parser.add_argument('--bands', default=["B02", "B03", "B04", "B05"], type=str, nargs='+',
                         help='Spectral bands to use.',
-                        choices=["B02", "B03", "B04", "B05", "B06", "B07", "B09", "B10", "B11"])
+                        choices=["B02", "B03", "B04", "B05", "B06", "B07", "B08", "B8A", "B09", "B10", "B11"])
     parser.add_argument('--random_cropping', action='store_true',
                         help='Use random cropping for input data. Default = True')
     parser.add_argument('--no_random_cropping', action='store_false', dest='random_cropping')
@@ -384,8 +384,11 @@ def fsdp_main(args):
     os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
 
     # get input metadata
-    with open("/workspace/gfm-gap-filling/pretraining/us_sampling_v1_t134_MC.json") as f:
+   # with open("/workspace/gfm-gap-filling/pretraining/us_sampling_v1_t134_MC.json") as f:
+    with open("/workspace/gfm-gap-filling/pretraining/CDL_chips.json") as f:
+#    with open("/workspace/gfm-gap-filling/pretraining/CDL_chips_5.json") as f:
         input_meta_data = json.load(f)
+    print(input_meta_data)
     # create model
     model = MaskedAutoencoderViT(img_size=img_size, patch_size=patch_size,
                  num_frames=num_frames, tubelet_size=tubelet_size,
@@ -397,6 +400,7 @@ def fsdp_main(args):
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"\n--> model has {total_params / 1e6} Million params.\n")
 
+    print(input_meta_data['bands'])
     # ____________ create batch dataset
     train_dataset = HLSDataset(train_dir, num_frames=num_frames, img_size=img_size, bands=input_meta_data['bands'],
                                random_cropping=random_cropping, remove_cloud=True, normalize=True,
