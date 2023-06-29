@@ -29,7 +29,8 @@ from torch.utils.tensorboard import SummaryWriter
 
 class HLSDataset(Dataset):
     def __init__(self, data_path, num_frames, img_size=224, bands=["B02", "B03", "B04", "B05"],
-                 random_cropping=True, remove_cloud=True, normalize=True,
+              #   random_cropping=True, remove_cloud=True,
+                 normalize=True,
                  # small trick: as all original values are integers, we make mean values as non-integer
                  # so normalized values have no 0, so that we can mark nodata as 0 because it is a good practice
                  # to fill nodata as mean/median.
@@ -38,8 +39,8 @@ class HLSDataset(Dataset):
         self.num_frames = num_frames
         self.img_size = img_size
         self.bands = bands
-        self.random_cropping = random_cropping
-        self.remove_cloud = remove_cloud
+     #   self.random_cropping = random_cropping
+     #   self.remove_cloud = remove_cloud
         self.normalize = normalize
         self.mean = mean  # corresponding mean per band for normalization purpose
         self.std = std  # corresponding std per band for normalization purpose
@@ -113,9 +114,9 @@ class HLSDataset(Dataset):
         tile_id, dates, col_start, row_start = self.indices[index]
         # we re-genereate random col_start and row_start here to make sure different data in different epochs,
         # otherwise, self.indices will remain same across different epochs as it is generated during dataset creation.
-        if self.random_cropping:
-            col_start = random.randrange(3660 - self.img_size + 1)
-            row_start = random.randrange(3660 - self.img_size + 1)
+        # if self.random_cropping:
+        #     col_start = random.randrange(3660 - self.img_size + 1)
+        #     row_start = random.randrange(3660 - self.img_size + 1)
         res = []
         for date in dates:
             channels = []
@@ -127,13 +128,13 @@ class HLSDataset(Dataset):
                     channels.append(img)
             channels = np.stack(channels, -1)  # img_size, img_size, C
 
-            if self.remove_cloud:
-                # mark all cloud and cloud shadow pixels as nodata
-                fmask_file = self.layout[tile_id][date]["Fmask"]
-                with rasterio.open(fmask_file) as src:
-                    fmask = src.read(1, window=Window(col_start, row_start, self.img_size, self.img_size))
-                cloud_mask = fmask << 4 >> 5 != 0  # mask = (fmask << 4 >> 5 != 0) & (fmask << 4 >> 5 != 2)
-                channels[cloud_mask] = -9999  # Mark all cloud pixels as nodata
+            # if self.remove_cloud:
+            #     # mark all cloud and cloud shadow pixels as nodata
+            #     fmask_file = self.layout[tile_id][date]["Fmask"]
+            #     with rasterio.open(fmask_file) as src:
+            #         fmask = src.read(1, window=Window(col_start, row_start, self.img_size, self.img_size))
+            #     cloud_mask = fmask << 4 >> 5 != 0  # mask = (fmask << 4 >> 5 != 0) & (fmask << 4 >> 5 != 2)
+            #     channels[cloud_mask] = -9999  # Mark all cloud pixels as nodata
 
             if self.normalize:
                 channels = np.where(channels == -9999, 0.0001,
@@ -154,6 +155,8 @@ def get_args_parser():
                         help='Path to the train data directory.')
     parser.add_argument('--val_dir', default='/dev/shm/val', type=str,
                         help='Path to the validation data directory.')
+    parser.add_argument('--mask_dir', default='/dev/shm/train', type=str,
+                        help='Path to the mask data directory.')
     parser.add_argument('--num_frames', default=3, type=int,
                         help='Number of frames in a sample.')
     parser.add_argument('--img_size', default=224, type=int,
@@ -325,7 +328,7 @@ def fsdp_main(args):
     num_frames = args.num_frames
     img_size = args.img_size
     bands = args.bands
-    random_cropping = args.random_cropping
+   # random_cropping = args.random_cropping
     num_workers = args.data_loader_num_workers
 
     # model related
@@ -385,8 +388,8 @@ def fsdp_main(args):
 
     # get input metadata
    # with open("/workspace/gfm-gap-filling/pretraining/us_sampling_v1_t134_MC.json") as f:
-    with open("/workspace/gfm-gap-filling/pretraining/CDL_chips.json") as f:
-#    with open("/workspace/gfm-gap-filling/pretraining/CDL_chips_5.json") as f:
+ #   with open("/workspace/gfm-gap-filling/pretraining/CDL_chips.json") as f:
+    with open("/workspace/gfm-gap-filling/pretraining/CDL_chips_5.json") as f:
         input_meta_data = json.load(f)
     print(input_meta_data)
     # create model
@@ -403,7 +406,8 @@ def fsdp_main(args):
     print(input_meta_data['bands'])
     # ____________ create batch dataset
     train_dataset = HLSDataset(train_dir, num_frames=num_frames, img_size=img_size, bands=input_meta_data['bands'],
-                               random_cropping=random_cropping, remove_cloud=True, normalize=True,
+                              # random_cropping=random_cropping, remove_cloud=True, 
+                               normalize=True,
                                mean=input_meta_data['image_mean'], std=input_meta_data['image_standard_deviation'],
                                indices=[[idx[0], idx[1], idx[3], idx[2]] for idx in input_meta_data['train_indices']
                                         if idx[2] != 3584 and idx[3] != 3584])
@@ -411,7 +415,8 @@ def fsdp_main(args):
         print(f"--> Training set len = {len(train_dataset)}")
 
     val_dataset = HLSDataset(val_dir, num_frames=num_frames, img_size=img_size, bands=input_meta_data['bands'],
-                             random_cropping=random_cropping, remove_cloud=True, normalize=True,
+                        #     random_cropping=random_cropping, remove_cloud=True, 
+                             normalize=True,
                              mean=input_meta_data['image_mean'], std=input_meta_data['image_standard_deviation'],
                              indices=[[idx[0], idx[1], idx[3], idx[2]] for idx in input_meta_data['val_indices']
                                         if idx[2] != 3584 and idx[3] != 3584])
