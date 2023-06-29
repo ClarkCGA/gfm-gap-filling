@@ -27,6 +27,136 @@ from torch.utils.data import Dataset
 from torch.utils.tensorboard import SummaryWriter
 
 
+class MaskDataset(Dataset):
+    def __init__(self, data_path, num_frames, img_size=224, bands=["CDL"], num_hls_bands = 4,
+                # random_cropping= False, remove_cloud= False,
+                 normalize= False,
+                 # small trick: as all original values are integers, we make mean values as non-integer
+                 # so normalized values have no 0, so that we can mark nodata as 0 because it is a good practice
+                 # to fill nodata as mean/median.
+                 mean=[431.5, 713.5, 747.5, 2512.5], std=[336, 388, 521, 1062], indices=None):
+        self.data_path = data_path
+        self.num_frames = num_frames
+        self.img_size = img_size
+        self.bands = bands
+        self.num_hls_bands = num_hls_bands,
+     #   self.random_cropping = random_cropping
+     #   self.remove_cloud = remove_cloud
+      #  self.normalize = normalize
+        self.mean = mean  # corresponding mean per band for normalization purpose
+        self.std = std  # corresponding std per band for normalization purpose
+
+        self.layout = self.get_data_layout()
+        if indices is not None:
+            self.quality_only = True
+            self.indices = indices
+        else:
+            self.quality_only = False
+            self.indices = self.get_indices()
+
+    def get_data_layout(self):
+        layout = {}
+        for root, dirs, files in os.walk(self.data_path):
+            for file in files:
+                if file.endswith('.tif'):
+                    tile = file.split('.')[2]
+                    date = file.split('.')[3].split('T')[0]
+                    band = file.split('.')[6]
+                    if tile not in layout:
+                        layout[tile] = {}
+                    if date not in layout[tile]:
+                        layout[tile][date] = {}
+                    layout[tile][date][band] = os.path.join(root, file)
+        return layout  # {'T14SMA': {'2017005': {'B02': '/home/lchu/hls/HLS.L30.T14SMA.2017005T170835.v2.0.B02.tif', ...
+
+    def get_indices(self):
+        indices = []
+        tiles = sorted(self.layout.keys())
+        for tile in tiles:
+            dates = sorted(self.layout[tile].keys())
+            start_date_indices = range(len(dates) - self.num_frames + 1)
+            for start_date_idx in start_date_indices:
+                # if self.random_cropping:
+                #     col_start = random.randrange(3660 - self.img_size + 1)
+                #     row_start = random.randrange(3660 - self.img_size + 1)
+                #     indices.append((tile, dates[start_date_idx:start_date_idx + self.num_frames], col_start, row_start))
+                #else:
+                for col_start in range(0, 3660 - self.img_size, self.img_size):
+                    for row_start in range(0, 3660 - self.img_size, self.img_size):
+                        indices.append(
+                            (tile, dates[start_date_idx:start_date_idx + self.num_frames], col_start, row_start))
+        return indices  # (tile_id, dates, col_start, row_start)
+
+    def __len__(self):
+        return len(self.indices)
+
+    def __getitem__(self, index):
+        if self.quality_only:
+            tile_id, dates, col_start, row_start = self.indices[index]
+            res = []
+            for date in dates:
+                channels = []
+                for band in self.bands:
+                    tif_file = self.layout[tile_id][date][band]
+                    with rasterio.open(tif_file) as src:
+                        img = src.read(1, window=Window(col_start, row_start, self.img_size,
+                                                        self.img_size))  # img_size, img_size
+                        channels.append(img)
+                        if img.shape != (224, 224):
+                            print(self.indices[index])
+                            print(src.read(1).shape)
+                            print(tile_id, date, band, img.shape, col_start, row_start)
+                channels = np.stack(channels, -1)  # img_size, img_size, C
+            #    channels = (channels - self.mean) / self.std
+                res.append(channels)
+            res = np.stack(res, 0)  # num_frames, img_size, img_size, C
+      #      print('shape')
+            res = np.moveaxis(res, -1, 0).astype('float32')
+           # b = np.repeat(a[:, :, np.newaxis], 3, axis=2)
+            res = np.repeat(res[ :, :, :], self.num_hls_bands, axis = 0)
+            # print('mask')
+            # print(res)
+            # print(res.shape)
+          #  print(np.repeat(res[ :, :, :], 4, axis = 0).shape)
+          #  return np.moveaxis(res, -1, 0).astype('float32')  # C, num_frames, img_size, img_size
+            return res
+
+        tile_id, dates, col_start, row_start = self.indices[index]
+        # we re-genereate random col_start and row_start here to make sure different data in different epochs,
+        # otherwise, self.indices will remain same across different epochs as it is generated during dataset creation.
+        # if self.random_cropping:
+        #     col_start = random.randrange(3660 - self.img_size + 1)
+        #     row_start = random.randrange(3660 - self.img_size + 1)
+        res = []
+        for date in dates:
+            channels = []
+            for band in self.bands:
+                tif_file = self.layout[tile_id][date][band]
+                with rasterio.open(tif_file) as src:
+                    img = src.read(1, window=Window(col_start, row_start, self.img_size,
+                                                    self.img_size))  # img_size, img_size
+                    channels.append(img)
+            channels = np.stack(channels, -1)  # img_size, img_size, C
+
+            # if self.remove_cloud:
+            #     # mark all cloud and cloud shadow pixels as nodata
+            #     fmask_file = self.layout[tile_id][date]["Fmask"]
+            #     with rasterio.open(fmask_file) as src:
+            #         fmask = src.read(1, window=Window(col_start, row_start, self.img_size, self.img_size))
+            #     cloud_mask = fmask << 4 >> 5 != 0  # mask = (fmask << 4 >> 5 != 0) & (fmask << 4 >> 5 != 2)
+            #     channels[cloud_mask] = -9999  # Mark all cloud pixels as nodata
+
+            # if self.normalize:
+            #     channels = np.where(channels == -9999, 0.0001,
+            #                         (channels - self.mean) / self.std)  # don't normalize on nodata
+          #  else:
+                #channels = channels * 0.0001  # if not normalize, just rescale
+
+            res.append(channels)
+        res = np.stack(res, 0)  # num_frames, img_size, img_size, C
+        return np.moveaxis(res, -1, 0).astype('float32')  # C, num_frames, img_size, img_size
+
+
 class HLSDataset(Dataset):
     def __init__(self, data_path, num_frames, img_size=224, bands=["B02", "B03", "B04", "B05"],
               #   random_cropping=True, remove_cloud=True,
@@ -325,9 +455,11 @@ def fsdp_main(args):
     # data loader related
     train_dir = args.train_dir
     val_dir = args.val_dir
+    mask_dir = args.mask_dir
     num_frames = args.num_frames
     img_size = args.img_size
     bands = args.bands
+    num_hls_bands = len(bands)
    # random_cropping = args.random_cropping
     num_workers = args.data_loader_num_workers
 
@@ -423,6 +555,24 @@ def fsdp_main(args):
     if rank == 0:
         print(f"--> Validation set len = {len(val_dataset)}")
 
+    mask_train_dataset = MaskDataset(mask_dir, num_frames=num_frames, img_size=img_size, bands=['CDL'], num_hls_bands = num_hls_bands,
+                               # random_cropping=random_cropping, remove_cloud=True, normalize=True,
+                               # mean=input_meta_data['image_mean'], std=input_meta_data['image_standard_deviation'],
+                               indices=[[idx[0], idx[1], idx[3], idx[2]] for idx in input_meta_data['train_indices']
+                                        if idx[2] != 3584 and idx[3] != 3584])
+    if rank == 0:
+        print(f"--> Mask Training set len = {len(mask_train_dataset)}")
+
+    
+
+    mask_val_dataset = MaskDataset(mask_dir, num_frames=num_frames, img_size=img_size, bands=['CDL'], num_hls_bands = num_hls_bands,
+                               # random_cropping=random_cropping, remove_cloud=True, normalize=True,
+                               # mean=input_meta_data['image_mean'], std=input_meta_data['image_standard_deviation'],
+                               indices=[[idx[0], idx[1], idx[3], idx[2]] for idx in input_meta_data['val_indices']
+                                        if idx[2] != 3584 and idx[3] != 3584])
+    if rank == 0:
+        print(f"--> Mask Val set len = {len(mask_val_dataset)}")
+
     train_sampler = DistributedSampler(train_dataset, rank=rank, num_replicas=world_size, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, rank=rank, num_replicas=world_size)
 
@@ -439,6 +589,19 @@ def fsdp_main(args):
     train_loader = torch.utils.data.DataLoader(train_dataset, **train_kwargs)
     test_loader = torch.utils.data.DataLoader(val_dataset, **test_kwargs)
 
+    mask_train_loader = torch.utils.data.DataLoader(mask_train_dataset, **train_kwargs)
+    mask_test_loader = torch.utils.data.DataLoader(mask_val_dataset, **test_kwargs)
+
+
+    # print('mask_train_dataset')
+    # print(len(mask_train_dataset))
+    # print(mask_train_dataset[0].shape)
+
+    # print('mask_test dataset')
+    # print(len(mask_val_dataset))
+    # print(mask_val_dataset[0].shape)
+          
+    
     torch.cuda.set_device(local_rank)
 
     torch.cuda.empty_cache()
