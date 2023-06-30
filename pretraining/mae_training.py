@@ -346,6 +346,7 @@ def train(
         local_rank,
         rank,
         train_loader,
+        mask_train_loader_list,
         optimizer,
         epoch,
         sampler=None,
@@ -373,7 +374,9 @@ def train(
 
         optimizer.zero_grad()
 
-        loss, pred, mask = model(batch.to(local_rank), mask_ratio)
+        label_mask_batch = mask_train_loader_list[i]
+
+        loss, pred, mask = model(batch.to(local_rank), label_mask_batch.to(local_rank), mask_ratio)
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
@@ -410,7 +413,7 @@ def train(
     return train_loss
 
 
-def validation(model, mask_ratio, local_rank, rank, test_loader):
+def validation(model, mask_val_loader_list, mask_ratio, local_rank, rank, test_loader):
     model.eval()
     ddp_loss = torch.zeros(2).to(local_rank)
     if rank == 0:
@@ -418,9 +421,9 @@ def validation(model, mask_ratio, local_rank, rank, test_loader):
             range(len(test_loader)), colour="green", desc="Validation Epoch"
         )
     with torch.no_grad():
-        for batch in test_loader:
-
-            loss, pred, mask = model(batch.to(local_rank), mask_ratio)
+        for i, batch in enumerate(test_loader):
+            label_mask_batch = mask_val_loader_list[i]
+            loss, pred, mask = model(batch.to(local_rank), label_mask_batch.to(local_rank), mask_ratio)
 
             ddp_loss[0] += loss.item()  # sum up batch loss
             ddp_loss[1] += 1
@@ -592,7 +595,25 @@ def fsdp_main(args):
     mask_train_loader = torch.utils.data.DataLoader(mask_train_dataset, **train_kwargs)
     mask_test_loader = torch.utils.data.DataLoader(mask_val_dataset, **test_kwargs)
 
+    print('mtd')
+    mask_train_loader_list = list(mask_train_loader)
+    mask_val_loader_list = list(mask_test_loader)
+  #  print(mask_train_loader_list[0])
 
+
+ #   print('train_loader')
+    # for i, batch in enumerate(train_loader):
+    #     print(i)
+    #     print(batch.shape)
+    #     print(mask_train_loader_list[i].shape)
+ #   print(len(train_loader))
+  #  print(type(train_loader))
+  #  print(train_loader[0])
+    
+
+ #   print('mask loader')
+  #  print(len(mask_train_loader))
+  #  print(len(mask_train_loader[0]))
     # print('mask_train_dataset')
     # print(len(mask_train_dataset))
     # print(mask_train_dataset[0].shape)
@@ -666,6 +687,7 @@ def fsdp_main(args):
             local_rank,
             rank,
             train_loader,
+            mask_train_loader_list,
             optimizer,
             epoch,
             sampler=train_sampler,
@@ -674,7 +696,7 @@ def fsdp_main(args):
             vis_path=vis_dir,
         )
 
-        curr_val_loss = validation(model, mask_ratio, local_rank, rank, test_loader)
+        curr_val_loss = validation(model, mask_val_loader_list, mask_ratio, local_rank, rank, test_loader)
 
         # Write logs in two formats: tensorboard and csv.
         if rank == 0:
