@@ -55,13 +55,22 @@ class PatchEmbed(nn.Module):
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
     def forward(self, x):
+        print('forward PE')
         B, C, T, H, W = x.shape
+        print(x.shape) # [4, 4, 3, 224, 224]
         _assert(H == self.img_size[0], f"Input image height ({H}) doesn't match model ({self.img_size[0]}).")
         _assert(W == self.img_size[1], f"Input image width ({W}) doesn't match model ({self.img_size[1]}).")
-        x = self.proj(x)
+        x = self.proj(x) ## this line is a Conv3D, but we had thought it is just a reshape... 
+        print(x.shape) # ([4, 1024, 3, 14, 14]) ## 1024 is from embed_dim
         if self.flatten:
-            x = x.flatten(2).transpose(1, 2)  # B,C,T,H,W -> B,C,L -> B,L,C
+            print('flatten')
+            x = x.flatten(2)
+            print(x.shape)
+            x = x.transpose(1, 2)  # B,C,T,H,W -> B,C,L -> B,L,C
+            print(x.shape)
+        print(x.shape) # [4, 588, 1024]
         x = self.norm(x)
+        print(x.shape) # [4, 588, 1024]
         return x
 
 
@@ -225,8 +234,8 @@ class MaskedAutoencoderViT(nn.Module):
         # embed patches
         print('forward encoder')
       #  print(x.shape)
-        print(label_mask_patch.shape)
-        print(label_mask_patch)
+      #  print(label_mask_patch.shape)
+       # print(label_mask_patch)
         
         x = self.patch_embed(x)
       #  print(x.shape)

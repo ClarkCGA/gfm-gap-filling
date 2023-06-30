@@ -578,6 +578,10 @@ def fsdp_main(args):
 
     train_sampler = DistributedSampler(train_dataset, rank=rank, num_replicas=world_size, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, rank=rank, num_replicas=world_size)
+    print('train_sampler')
+    print(len(train_sampler))
+    print(dir(train_sampler))
+
 
     train_kwargs = {"batch_size": batch_size, "sampler": train_sampler}
     test_kwargs = {"batch_size": 2, "sampler": val_sampler}
