@@ -578,9 +578,9 @@ def fsdp_main(args):
 
     train_sampler = DistributedSampler(train_dataset, rank=rank, num_replicas=world_size, shuffle=True)
     val_sampler = DistributedSampler(val_dataset, rank=rank, num_replicas=world_size)
-    print('train_sampler')
-    print(len(train_sampler))
-    print(dir(train_sampler))
+  #  print('train_sampler')
+ #   print(len(train_sampler))
+  #  print(dir(train_sampler))
 
 
     train_kwargs = {"batch_size": batch_size, "sampler": train_sampler}
@@ -599,7 +599,7 @@ def fsdp_main(args):
     mask_train_loader = torch.utils.data.DataLoader(mask_train_dataset, **train_kwargs)
     mask_test_loader = torch.utils.data.DataLoader(mask_val_dataset, **test_kwargs)
 
-    print('mtd')
+  #  print('mtd')
     mask_train_loader_list = list(mask_train_loader)
     mask_val_loader_list = list(mask_test_loader)
   #  print(mask_train_loader_list[0])
