@@ -523,8 +523,8 @@ def fsdp_main(args):
 
     # get input metadata
    # with open("/workspace/gfm-gap-filling/pretraining/us_sampling_v1_t134_MC.json") as f:
- #   with open("/workspace/gfm-gap-filling/pretraining/CDL_chips.json") as f:
-    with open("/workspace/gfm-gap-filling/pretraining/CDL_chips_5.json") as f:
+    with open("/workspace/gfm-gap-filling/pretraining/CDL_chips.json") as f:
+ #   with open("/workspace/gfm-gap-filling/pretraining/CDL_chips_5.json") as f:
         input_meta_data = json.load(f)
     print(input_meta_data)
     # create model
