@@ -204,7 +204,7 @@ class MaskedAutoencoderViT(nn.Module):
         x: [N, L, D], sequence
         """
         N, L, D = x.shape  # batch, length, dim
-        len_keep = int(L * (1 - mask_ratio))
+     #   len_keep = int(L * (1 - mask_ratio))
      #   print('rm')
      #   print('len keep')
      #   print(len_keep)
@@ -214,11 +214,11 @@ class MaskedAutoencoderViT(nn.Module):
     #    print('rm label mask')
      #   print(label_mask_patch.shape)
 
-
         label_mask_patch_max, _ = torch.max(label_mask_patch, dim=-1)
+        ## CHECKS FOR MASKING
       #  print('max shape')
       #  print(label_mask_patch_max.shape)
-
+      #  print(label_mask_patch_max[:,0:50])
         ## WHEN COUNTING UNMASKED PATCHES, ONLY COUNT FOR 1 BATCH
         label_mask_zero_count = (label_mask_patch_max[0, :] == 0.).sum().item()
       #  print('max sum')
@@ -257,7 +257,7 @@ class MaskedAutoencoderViT(nn.Module):
     #    print('rm noise')
      #   print(noise.shape)
       #  print('len keep')
-       # print(len_keep)
+       # print(len_keep) 
         
         # sort noise for each sample
         ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
@@ -270,9 +270,10 @@ class MaskedAutoencoderViT(nn.Module):
         #print(ids_restore)
         # keep the first subset
         ids_keep = ids_shuffle[:, :len_keep]
-        #print('ids keep')
-        #print(ids_keep.shape)
-        #print(ids_keep)
+        ## CHECKS FOR MASKING
+     #   print('ids keep')
+     #   print(ids_keep.shape)
+     #   print(ids_keep)
         x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
 
         # generate the binary mask: 0 is keep, 1 is remove
