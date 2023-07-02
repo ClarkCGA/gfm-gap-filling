@@ -11,6 +11,7 @@ import yaml
 from torch.nn.parallel import DistributedDataParallel as DDP
 from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data.distributed import DistributedSampler
+from torch.utils.data import ConcatDataset
 
 from mae.models_mae import MaskedAutoencoderViT
 # from preprocessing.dataset import HLS2Dataset as HLSDataset
@@ -25,6 +26,33 @@ from rasterio.windows import Window
 from torch.utils.data import Dataset
 
 from torch.utils.tensorboard import SummaryWriter
+
+from torch.utils.data import Dataset
+
+class CombinedDataset(Dataset):
+    def __init__(self, dataset1, dataset2):
+        self.dataset1 = dataset1
+        self.dataset2 = dataset2
+
+        assert len(dataset1) == len(dataset2), "Datasets must have the same length"
+        assert dataset1[0].shape == dataset2[0].shape, "Tensors must have the same shape"
+
+    def __len__(self):
+        return len(self.dataset1)
+
+    def __getitem__(self, index):
+        data1 = self.dataset1[index]
+        data2 = self.dataset2[index]
+
+        # Add a new dimension to differentiate between datasets
+        data1 = np.expand_dims(data1, 0) # Adds a dimension at index 0
+        data2 = np.expand_dims(data2, 0) 
+        # Concatenate the tensors along the new dimension
+        combined_data = np.concatenate((data1, data2), axis=0)
+
+        # Return the combined data with the respective label
+       # label = self.dataset1[index]['label']
+        return combined_data
 
 
 class MaskDataset(Dataset):
@@ -346,7 +374,7 @@ def train(
         local_rank,
         rank,
         train_loader,
-        mask_train_loader_list,
+     #   mask_train_loader_list,
         optimizer,
         epoch,
         sampler=None,
@@ -371,10 +399,18 @@ def train(
         #
         # if rank == 0:
         #     print(f"test random seed: {batch.sum()}")
+    #    print('train loader run')
+    #    print(batch.shape)
 
+        label_mask_batch = batch[:,1,:,:,:,:]
+
+        batch = batch[:,0,:,:,:,:]
+
+
+        
         optimizer.zero_grad()
 
-        label_mask_batch = mask_train_loader_list[i]
+       # label_mask_batch = mask_train_loader_list[i]
 
         loss, pred, mask = model(batch.to(local_rank), label_mask_batch.to(local_rank), mask_ratio)
 
@@ -413,7 +449,7 @@ def train(
     return train_loss
 
 
-def validation(model, mask_val_loader_list, mask_ratio, local_rank, rank, test_loader):
+def validation(model,  mask_ratio, local_rank, rank, test_loader):
     model.eval()
     ddp_loss = torch.zeros(2).to(local_rank)
     if rank == 0:
@@ -422,7 +458,10 @@ def validation(model, mask_val_loader_list, mask_ratio, local_rank, rank, test_l
         )
     with torch.no_grad():
         for i, batch in enumerate(test_loader):
-            label_mask_batch = mask_val_loader_list[i]
+            label_mask_batch = batch[:,1,:,:,:,:]
+
+            batch = batch[:,0,:,:,:,:]
+          #  label_mask_batch = mask_val_loader_list[i]
             loss, pred, mask = model(batch.to(local_rank), label_mask_batch.to(local_rank), mask_ratio)
 
             ddp_loss[0] += loss.item()  # sum up batch loss
@@ -523,8 +562,8 @@ def fsdp_main(args):
 
     # get input metadata
    # with open("/workspace/gfm-gap-filling/pretraining/us_sampling_v1_t134_MC.json") as f:
- #   with open("/workspace/gfm-gap-filling/pretraining/CDL_chips.json") as f:
-    with open("/workspace/gfm-gap-filling/pretraining/CDL_chips_5.json") as f:
+    with open("/workspace/gfm-gap-filling/pretraining/CDL_chips.json") as f:
+#    with open("/workspace/gfm-gap-filling/pretraining/CDL_chips_5.json") as f:
         input_meta_data = json.load(f)
     print(input_meta_data)
     # create model
@@ -566,7 +605,8 @@ def fsdp_main(args):
     if rank == 0:
         print(f"--> Mask Training set len = {len(mask_train_dataset)}")
 
-    
+
+
 
     mask_val_dataset = MaskDataset(mask_dir, num_frames=num_frames, img_size=img_size, bands=['CDL'], num_hls_bands = num_hls_bands,
                                # random_cropping=random_cropping, remove_cloud=True, normalize=True,
@@ -576,8 +616,24 @@ def fsdp_main(args):
     if rank == 0:
         print(f"--> Mask Val set len = {len(mask_val_dataset)}")
 
-    train_sampler = DistributedSampler(train_dataset, rank=rank, num_replicas=world_size, shuffle=True)
-    val_sampler = DistributedSampler(val_dataset, rank=rank, num_replicas=world_size)
+    print('dataset')
+   # print(type(mask_train_dataset))
+  #  print(dir(mask_train_dataset))
+  #  print(len(mask_train_dataset))
+    print('combined dataset')
+    combined_train_dataset = CombinedDataset(train_dataset, mask_train_dataset)
+    combined_val_dataset = CombinedDataset(val_dataset, mask_val_dataset)
+
+    print(len(combined_train_dataset))
+
+
+    
+  #  train_sampler = DistributedSampler(train_dataset, rank=rank, num_replicas=world_size, shuffle=True)
+  #  val_sampler = DistributedSampler(val_dataset, rank=rank, num_replicas=world_size)
+
+    train_sampler = DistributedSampler(combined_train_dataset, rank=rank, num_replicas=world_size, shuffle=True)
+    val_sampler = DistributedSampler(combined_val_dataset, rank=rank, num_replicas=world_size, shuffle=True)
+
   #  print('train_sampler')
  #   print(len(train_sampler))
   #  print(dir(train_sampler))
@@ -593,23 +649,30 @@ def fsdp_main(args):
     train_kwargs.update(common_kwargs)
     test_kwargs.update(common_kwargs)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, **train_kwargs)
-    test_loader = torch.utils.data.DataLoader(val_dataset, **test_kwargs)
+    train_loader = torch.utils.data.DataLoader(combined_train_dataset, **train_kwargs)
+    test_loader = torch.utils.data.DataLoader(combined_val_dataset, **test_kwargs)
 
-    mask_train_loader = torch.utils.data.DataLoader(mask_train_dataset, **train_kwargs)
-    mask_test_loader = torch.utils.data.DataLoader(mask_val_dataset, **test_kwargs)
+ #   mask_train_loader = torch.utils.data.DataLoader(mask_train_dataset, **train_kwargs)
+  #  mask_test_loader = torch.utils.data.DataLoader(mask_val_dataset, **test_kwargs)
 
   #  print('mtd')
-    mask_train_loader_list = list(mask_train_loader)
-    mask_val_loader_list = list(mask_test_loader)
+  #  mask_train_loader_list = list(mask_train_loader)
+  #  mask_val_loader_list = list(mask_test_loader)
   #  print(mask_train_loader_list[0])
 
 
- #   print('train_loader')
+    # print('combined train_loader')
     # for i, batch in enumerate(train_loader):
-    #     print(i)
-    #     print(batch.shape)
-    #     print(mask_train_loader_list[i].shape)
+    #  #   print(i)
+    #  #   print(batch.shape)
+    #     x = batch[:,0,:,:,:,:]
+    #   #  print(x)
+    #   #  print(type(x))
+    #     print(x.shape)
+    #     mask = batch[:,1,:,:,:,:]
+    #    # print(mask)
+    #   #  print(mask.shape)
+    #     #print(mask_train_loader_list[i].shape)
  #   print(len(train_loader))
   #  print(type(train_loader))
   #  print(train_loader[0])
@@ -691,7 +754,7 @@ def fsdp_main(args):
             local_rank,
             rank,
             train_loader,
-            mask_train_loader_list,
+          #  mask_train_loader_list,
             optimizer,
             epoch,
             sampler=train_sampler,
@@ -700,7 +763,7 @@ def fsdp_main(args):
             vis_path=vis_dir,
         )
 
-        curr_val_loss = validation(model, mask_val_loader_list, mask_ratio, local_rank, rank, test_loader)
+        curr_val_loss = validation(model, mask_ratio, local_rank, rank, test_loader)
 
         # Write logs in two formats: tensorboard and csv.
         if rank == 0:

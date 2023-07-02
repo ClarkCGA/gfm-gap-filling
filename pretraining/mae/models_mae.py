@@ -57,7 +57,7 @@ class PatchEmbed(nn.Module):
     def forward(self, x):
       #  print('forward PE')
         B, C, T, H, W = x.shape
-        print(x.shape) # [4, 4, 3, 224, 224]
+     #   print(x.shape) # [4, 4, 3, 224, 224]
         _assert(H == self.img_size[0], f"Input image height ({H}) doesn't match model ({self.img_size[0]}).")
         _assert(W == self.img_size[1], f"Input image width ({W}) doesn't match model ({self.img_size[1]}).")
         x = self.proj(x) ## this line is a Conv3D, but we had thought it is just a reshape... 
@@ -204,16 +204,14 @@ class MaskedAutoencoderViT(nn.Module):
         x: [N, L, D], sequence
         """
         N, L, D = x.shape  # batch, length, dim
-     #   len_keep = int(L * (1 - mask_ratio))
+       # len_keep = int(L * (1 - mask_ratio))
      #   print('rm')
-     #   print('len keep')
-     #   print(len_keep)
-     #   print('rm x')
+    #    print('rm x')
      #   print(x.shape)
       #  print(x)
-    #    print('rm label mask')
+     #   print('rm label mask')
      #   print(label_mask_patch.shape)
-
+     #   print(label_mask_patch)
         label_mask_patch_max, _ = torch.max(label_mask_patch, dim=-1)
         ## CHECKS FOR MASKING
       #  print('max shape')
@@ -286,9 +284,9 @@ class MaskedAutoencoderViT(nn.Module):
 
     def forward_encoder(self, x, label_mask_patch, mask_ratio):
         # embed patches
-       # print('forward encoder')
-       # print(x.shape)
-       # print(label_mask_patch.shape)
+      #  print('forward encoder')
+     #   print(x.shape)
+     #   print(label_mask_patch.shape)
        # print(label_mask_patch)
 
 
@@ -363,11 +361,11 @@ class MaskedAutoencoderViT(nn.Module):
 
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
-        print('forward loss')
-        print(pred.shape)
-        print(mask.shape)
-        print(loss)
-        print(mask.sum())
+     #   print('forward loss')
+     #   print(pred.shape)
+    #    print(mask.shape)
+     #   print(loss)
+    #    print(mask.sum())
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
 
