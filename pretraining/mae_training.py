@@ -563,7 +563,7 @@ def fsdp_main(args):
     # get input metadata
    # with open("/workspace/gfm-gap-filling/pretraining/us_sampling_v1_t134_MC.json") as f:
    # with open("/workspace/gfm-gap-filling/pretraining/CDL_chips.json") as f:
-#    with open("/workspace/gfm-gap-filling/pretraining/CDL_chips_5.json") as f:
+ #  with open("/workspace/gfm-gap-filling/pretraining/CDL_chips_5.json") as f:
     with open("/workspace/gfm-gap-filling/pretraining/CDL_chips_no_bad.json") as f:
         input_meta_data = json.load(f)
     print(input_meta_data)
@@ -643,7 +643,7 @@ def fsdp_main(args):
     train_kwargs = {"batch_size": batch_size, "sampler": train_sampler}
     test_kwargs = {"batch_size": 2, "sampler": val_sampler}
     common_kwargs = {
-        "num_workers": num_workers,
+        #"num_workers": num_workers,
         "pin_memory": False,
         "drop_last": True
     }
