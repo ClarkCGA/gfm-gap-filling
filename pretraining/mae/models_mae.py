@@ -366,6 +366,8 @@ class MaskedAutoencoderViT(nn.Module):
     #    print(mask.shape)
      #   print(loss)
     #    print(mask.sum())
+        print('mask sum')
+        print(mask.sum())
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
 
