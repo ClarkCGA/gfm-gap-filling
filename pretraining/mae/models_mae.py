@@ -33,7 +33,7 @@ class PatchEmbed(nn.Module):
             num_frames=3,
             tubelet_size=1,
             in_chans=3,
-            embed_dim=768,
+            embed_dim=1024,
             norm_layer=None,
             flatten=True,
             bias=True,
@@ -366,8 +366,8 @@ class MaskedAutoencoderViT(nn.Module):
     #    print(mask.shape)
      #   print(loss)
     #    print(mask.sum())
-        print('mask sum')
-        print(mask.sum())
+       # print('mask sum')
+        #print(mask.sum())
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
 

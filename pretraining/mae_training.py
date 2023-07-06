@@ -33,8 +33,8 @@ class CombinedDataset(Dataset):
     def __init__(self, dataset1, dataset2):
         self.dataset1 = dataset1
         self.dataset2 = dataset2
-
-        assert len(dataset1) == len(dataset2), "Datasets must have the same length"
+        self.dataset2length = len(dataset2)
+        
         assert dataset1[0].shape == dataset2[0].shape, "Tensors must have the same shape"
 
     def __len__(self):
@@ -42,7 +42,7 @@ class CombinedDataset(Dataset):
 
     def __getitem__(self, index):
         data1 = self.dataset1[index]
-        data2 = self.dataset2[index]
+        data2 = self.dataset2[random.randint(0, self.dataset2length - 1)] # Get a random mask from the mask dataset
 
         # Add a new dimension to differentiate between datasets
         data1 = np.expand_dims(data1, 0) # Adds a dimension at index 0
@@ -137,6 +137,8 @@ class MaskDataset(Dataset):
                 channels = np.stack(channels, -1)  # img_size, img_size, C
             #    channels = (channels - self.mean) / self.std
                 res.append(channels)
+            res[0] = np.zeros_like(res[0])
+            res[2] = np.zeros_like(res[2])
             res = np.stack(res, 0)  # num_frames, img_size, img_size, C
       #      print('shape')
             res = np.moveaxis(res, -1, 0).astype('float32')
@@ -389,7 +391,7 @@ def train(
         sampler.set_epoch(epoch)
     if rank == 0:
         inner_pbar = tqdm.tqdm(
-            range(len(train_loader)), colour="blue", desc="Training Epoch"
+            range(len(train_loader)), colour="blue", desc="Training Epoch", leave=True
         )
     # start = time.time()
     for i, batch in enumerate(train_loader):
@@ -431,10 +433,11 @@ def train(
 
         scheduler.step()
 
-        if epoch == 100:
+        if epoch == 5 and i <= 5:
             if rank == 0 and vis_path is not None:
                 os.makedirs(vis_path, exist_ok=True)
                 torch.save(batch.detach().cpu(), os.path.join(vis_path, f'input_{i}.pt'))
+                torch.save(label_mask_batch.detach().cpu(), os.path.join(vis_path, f'input_mask_{i}.pt'))
                 torch.save(model.module.unpatchify(mask.unsqueeze(-1).repeat(1, 1, pred.shape[-1])).detach().cpu(), os.path.join(vis_path, f'mask_{i}.pt'))
                 torch.save(model.module.unpatchify(pred).detach().cpu(), os.path.join(vis_path, f'pred_{i}.pt'))
         dist.barrier()
@@ -454,7 +457,7 @@ def validation(model,  mask_ratio, local_rank, rank, test_loader):
     ddp_loss = torch.zeros(2).to(local_rank)
     if rank == 0:
         inner_pbar = tqdm.tqdm(
-            range(len(test_loader)), colour="green", desc="Validation Epoch"
+            range(len(test_loader)), colour="green", desc="Validation Epoch", leave=True
         )
     with torch.no_grad():
         for i, batch in enumerate(test_loader):
@@ -563,10 +566,9 @@ def fsdp_main(args):
     # get input metadata
    # with open("/workspace/gfm-gap-filling/pretraining/us_sampling_v1_t134_MC.json") as f:
    # with open("/workspace/gfm-gap-filling/pretraining/CDL_chips.json") as f:
- #  with open("/workspace/gfm-gap-filling/pretraining/CDL_chips_5.json") as f:
+    #with open("/workspace/gfm-gap-filling/pretraining/CDL_chips_5.json") as f:
     with open("/workspace/gfm-gap-filling/pretraining/CDL_chips_no_bad.json") as f:
         input_meta_data = json.load(f)
-    print(input_meta_data)
     # create model
     model = MaskedAutoencoderViT(img_size=img_size, patch_size=patch_size,
                  num_frames=num_frames, tubelet_size=tubelet_size,
