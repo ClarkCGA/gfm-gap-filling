@@ -17,7 +17,7 @@ import torch.nn as nn
 from timm.models.vision_transformer import Block
 from timm.models.layers import to_2tuple, _assert
 
-from util.pos_embed import get_3d_sincos_pos_embed
+from mae.util.pos_embed import get_3d_sincos_pos_embed
 
 from einops import rearrange
 
