@@ -27,4 +27,6 @@ RUN pip install --pre torch==2.0.1+cu117 torchvision --index-url https://downloa
 # RUN pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu117
 
 RUN python3 -m pip install jupyterlab
-ENTRYPOINT ["jupyter", "lab", "--ip=0.0.0.0", "--allow-root"]
+EXPOSE 8889
+
+ENTRYPOINT ["jupyter", "lab", "--port=8889", "--ip=0.0.0.0", "--allow-root"]
