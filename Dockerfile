@@ -1,7 +1,10 @@
 # switch to miniconda3 base as pytorch base uses python3.7
-FROM continuumio/miniconda3:latest
+FROM continuumio/miniconda3:23.3.1-0
 
 # permanent dependencies, put on top to avoid re-build
+RUN pip install --upgrade pip
+RUN apt-get update && apt-get install -y vim tmux && \
+    pip install pip-tools
 RUN pip install transformers==4.21.2 timm==0.9.2 einops==0.6.1 rasterio==1.3.7 tensorboard==2.13.0 datasets tqdm protobuf colorama scikit-learn && \
 	pip uninstall torch torchaudio torchvision -y
 
