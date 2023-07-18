@@ -31,7 +31,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import Dataset
 
 class CombinedDataset(Dataset):
-    def __init__(self, data_path, split="train", num_frames=3, img_size=224, bands=["CDL"], num_hls_bands = 6,
+    def __init__(self, data_path, split="train", num_frames=3, img_size=224, bands=["CDL"], num_hls_bands = 6, cloud_range = (0,1)
                  normalize=True,
                  # small trick: as all original values are integers, we make mean values as non-integer
                  # so normalized values have no 0, so that we can mark nodata as 0 because it is a good practice
@@ -46,10 +46,11 @@ class CombinedDataset(Dataset):
         self.img_size = img_size
         self.bands = bands
         self.num_hls_bands = num_hls_bands,
+        self.cloud_range = cloud_range
         self.normalize = normalize
 
         self.tif_paths = self._get_tif_paths()[:32]
-        self.cloud_paths = self._get_cloud_paths()[:32]
+        self.cloud_paths, self.cloud_catalog = self._get_cloud_paths()
 
         self.n_cloudpaths = len(self.cloud_paths)
         self.mean = mean  # corresponding mean per band for normalization purpose
@@ -68,12 +69,12 @@ class CombinedDataset(Dataset):
     # Create list of all paths to clouds
     def _get_cloud_paths(self):
         csv = pd.read_csv(self.root_dir.joinpath("fmask_tracker.csv"))
-        catalog = csv.loc[(csv["usage"] == self.split) & (csv["cloud_pct"] <= .6) & (csv["cloud_pct"] >= .3)]
+        catalog = csv.loc[(csv["usage"] == self.split) & (csv["cloud_pct"] <= self.cloud_range[1]) & (csv["cloud_pct"] >= self.cloud_range[0])]
         itemlist = sorted(catalog["fmask_name"].tolist())
         chipslist = list(self.cloud_dir.glob("*.tif"))
         pathlist = [self.cloud_dir.joinpath(f"{item}") for item in itemlist]
         truelist = list(set(pathlist) & set(chipslist))
-        return pathlist
+        return truelist, catalog
     
     def __len__(self):
         return len(self.tif_paths)
@@ -336,6 +337,7 @@ def fsdp_main(args):
     os.makedirs(job_info_dir, exist_ok=True)
     with open(os.path.join(job_info_dir, f'{job_id}.yaml'), 'w') as f:
         yaml.safe_dump(params_dict, f, default_flow_style=None, sort_keys=False)
+    
 
     # set seed in a way that:
     # 1. ensure reproducibility
@@ -378,6 +380,9 @@ def fsdp_main(args):
         print(f"--> Validation set len = {len(val_dataset)}")
     if rank == 0:
         print(f"--> Validation set masks = {val_dataset.n_cloudpaths}")
+    
+    train_dataset.cloud_catalog.to_csv(os.path.join(job_info_dir, "train_cloud_catalog.csv"), index=False)
+    val_dataset.cloud_catalog.to_csv(os.path.join(job_info_dir, "val_cloud_catalog.csv"), index=False)
     
   #  train_sampler = DistributedSampler(train_dataset, rank=rank, num_replicas=world_size, shuffle=True)
   #  val_sampler = DistributedSampler(val_dataset, rank=rank, num_replicas=world_size)
