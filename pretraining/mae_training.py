@@ -14,6 +14,7 @@ from torch.optim.lr_scheduler import OneCycleLR
 from torch.utils.data.distributed import DistributedSampler
 from torch.utils.data import ConcatDataset
 
+import mae.models_mae
 from mae.models_mae import MaskedAutoencoderViT
 # from preprocessing.dataset import HLS2Dataset as HLSDataset
 
@@ -31,7 +32,7 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import Dataset
 
 class CombinedDataset(Dataset):
-    def __init__(self, data_path, split="train", num_frames=3, img_size=224, bands=["CDL"], num_hls_bands = 6, cloud_range = (0,1)
+    def __init__(self, data_path, split="train", num_frames=3, img_size=224, bands=["CDL"], num_hls_bands = 6, cloud_range = [0.01,1.0],
                  normalize=True,
                  # small trick: as all original values are integers, we make mean values as non-integer
                  # so normalized values have no 0, so that we can mark nodata as 0 because it is a good practice
@@ -49,7 +50,7 @@ class CombinedDataset(Dataset):
         self.cloud_range = cloud_range
         self.normalize = normalize
 
-        self.tif_paths = self._get_tif_paths()[:32]
+        self.tif_paths = self._get_tif_paths()
         self.cloud_paths, self.cloud_catalog = self._get_cloud_paths()
 
         self.n_cloudpaths = len(self.cloud_paths)
@@ -91,7 +92,7 @@ class CombinedDataset(Dataset):
             groundtruth = np.where(groundtruth == -9999, 0.0001,
                                     (groundtruth - self.mean) / self.std)  # don't normalize on nodata
         else:
-            groundtruth = groundtruth * 0.0002  # if not normalize, just rescale
+            groundtruth = groundtruth * 0.0001  # if not normalize, just rescale
         
         # Transpose to bands, time steps, height, width
         groundtruth = groundtruth.reshape(self.num_frames, self.bands, self.img_size, self.img_size)
@@ -138,6 +139,13 @@ def get_args_parser():
     parser.add_argument('--data_loader_num_workers', default=2, type=int,
                         help='Number of data loader workers.')
 
+    parser.add_argument(
+        "--cloud_range",
+        type=float,
+        default=[0,1],
+        nargs="+",
+        help="Lower and upper boundaries for cloud ratios",
+    )
     # model related
     parser.add_argument('--num_layers', default=12, type=int,
                         help='Number of layers in the model.')
@@ -151,7 +159,7 @@ def get_args_parser():
                         help='Masking ratio (percentage of removed patches).')
     parser.add_argument('--tubelet_size', default=1, type=int,
                         help='Temporal patch size.')
-    parser.add_argument('--checkpoint', default='', type=str,
+    parser.add_argument('--checkpoint', default='/workspace/gfm-gap-filling/pretraining/epoch-832-loss-0.0473.pt', type=str,
                         help='Path to a checkpoint file to load from.')
 
     # training related
@@ -163,6 +171,7 @@ def get_args_parser():
     # parser.add_argument('--lr_decay', type=float, default=0.85,
     #                     help='Learning rate decay')
     parser.add_argument('--num_epochs', default=50, type=int)
+    parser.add_argument('--local_rank', default=0, type=int)
 
     # logging related
     parser.add_argument('--base_log_dir', default='/workspace/data/lchu/hls/logs',
@@ -193,9 +202,10 @@ def train(
 ):
     model.train()
     ddp_loss = torch.zeros(2).to(local_rank)
+    mask_ratio = torch.zeros(2).to(local_rank)
 
-    if sampler:
-        sampler.set_epoch(epoch)
+    # if sampler:
+    #     sampler.set_epoch(epoch)
     inner_pbar = tqdm.tqdm(
         range(len(train_loader)), colour="blue", desc="Training Epoch", leave=True
     )
@@ -218,6 +228,9 @@ def train(
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
         optimizer.step()
 
+        mask_ratio[0] += torch.mean(mask)
+        mask_ratio[1] += 1
+
         ddp_loss[0] += loss.item()
         ddp_loss[1] += 1
 
@@ -227,27 +240,29 @@ def train(
    
         scheduler.step()
 
-        if epoch == 1 and i <= 5:
+        if epoch % 10 == 0 and i <= 1:
             if vis_path is not None:
                 os.makedirs(vis_path, exist_ok=True)
                 torch.save(batch.detach().cpu(), os.path.join(vis_path, f'input_{i}.pt'))
                 torch.save(label_mask_batch.detach().cpu(), os.path.join(vis_path, f'input_mask_{i}.pt'))
                 torch.save(model.module.unpatchify(mask.unsqueeze(-1).repeat(1, 1, pred.shape[-1])).detach().cpu(), os.path.join(vis_path, f'mask_{i}.pt'))
                 torch.save(model.module.unpatchify(pred).detach().cpu(), os.path.join(vis_path, f'pred_{i}.pt'))
-        dist.barrier()
+        # dist.barrier()
 
     # consolidate final loss number - do not use .reduce here, requires global synch
-    dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
+    # dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
     train_loss = ddp_loss[0] / ddp_loss[1]
+    epoch_mask_ratio = mask_ratio[0] / mask_ratio[1]
     inner_pbar.close()
 
-    print(f"Train Epoch: \t{epoch}, Loss: \t{train_loss:.4f}")
-    return train_loss
+    print(f"Train Epoch: \t{epoch}, Loss: \t{train_loss:.4f}, Mask Ratio: \t{epoch_mask_ratio:.4f}")
+    return train_loss, epoch_mask_ratio
 
 
 def validation(model,  mask_ratio, local_rank, rank, test_loader):
     model.eval()
     ddp_loss = torch.zeros(2).to(local_rank)
+    mask_ratio = torch.zeros(2).to(local_rank)
     inner_pbar = tqdm.tqdm(
         range(len(test_loader)), colour="green", desc="Validation Epoch", leave=True
     )
@@ -259,22 +274,25 @@ def validation(model,  mask_ratio, local_rank, rank, test_loader):
           #  label_mask_batch = mask_val_loader_list[i]
             loss, pred, mask = model(batch.to(local_rank), label_mask_batch.to(local_rank), mask_ratio)
 
+            mask_ratio[0] += torch.mean(mask)
+            mask_ratio[1] += 1
+            
             ddp_loss[0] += loss.item()  # sum up batch loss
             ddp_loss[1] += 1
 
             inner_pbar.update(1)
 
-    dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
+    # dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
     val_loss = ddp_loss[0] / ddp_loss[1]
-
+    epoch_mask_ratio = mask_ratio[0] / mask_ratio[1]
+    
     inner_pbar.close()
-    print(f"Validation Loss: {val_loss:.4f}")
-    return val_loss
+    print(f"Validation Loss: {val_loss:.4f}, Mask Ratio: \t{epoch_mask_ratio:.4f}")
+    return val_loss, epoch_mask_ratio
 
 
 def fsdp_main(args):
     """main process, run within each individual GPU process"""
-
     # TODO: can we get the time the job was submitted?
     start_time = f"{time.strftime('%Y-%m-%d %H:%M:%S')}"
 
@@ -282,9 +300,9 @@ def fsdp_main(args):
     torch.autograd.set_detect_anomaly(True)
 
     # torchrun specific
-    local_rank = int(os.environ["LOCAL_RANK"])
+    local_rank = args.local_rank
     rank = 0
-    world_size = int(os.environ["WORLD_SIZE"])
+    world_size = 1
 
     ### Configs
     # data loader related
@@ -295,6 +313,7 @@ def fsdp_main(args):
     img_size = args.img_size
     bands = args.bands
     num_hls_bands = len(bands)
+    cloud_range = args.cloud_range
    # random_cropping = args.random_cropping
     num_workers = args.data_loader_num_workers
 
@@ -348,24 +367,36 @@ def fsdp_main(args):
     torch.manual_seed(2022)
 
     # distributed setup
-    dist.init_process_group("nccl")
-    os.environ["TORCH_SHOW_CPP_STACKTRACES"] = str(1)
-    os.environ["NCCL_ASYNC_ERROR_HANDLING"] = str(1)
-    os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
+    # dist.init_process_group("nccl")
+    # os.environ["TORCH_SHOW_CPP_STACKTRACES"] = str(1)
+    # os.environ["NCCL_ASYNC_ERROR_HANDLING"] = str(1)
+    # os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
 
     # create model
-    model = MaskedAutoencoderViT(img_size=img_size, patch_size=patch_size,
-                 num_frames=num_frames, tubelet_size=tubelet_size,
-                 in_chans=6, embed_dim=embed_dim, depth=num_layers, num_heads=num_heads,
-                 decoder_embed_dim=int(embed_dim/2), decoder_depth=8, decoder_num_heads=num_heads,
-                 mlp_ratio=4., norm_layer=functools.partial(torch.nn.LayerNorm, eps=1e-6), norm_pix_loss=False)
+    # model = MaskedAutoencoderViT(img_size=img_size, patch_size=patch_size,
+    #              num_frames=num_frames, tubelet_size=tubelet_size,
+    #              in_chans=6, embed_dim=embed_dim, depth=num_layers, num_heads=num_heads,
+    #              decoder_embed_dim=int(embed_dim/2), decoder_depth=8, decoder_num_heads=num_heads,
+    #              mlp_ratio=4., norm_layer=functools.partial(torch.nn.LayerNorm, eps=1e-6), norm_pix_loss=False)
+
+    def prepare_model(checkpoint, arch='mae_vit_base_patch16'):
+        # build model
+        model = getattr(mae.models_mae, arch)()
+        # load model
+        checkpoint_file = torch.load(checkpoint, map_location=f'cuda:{local_rank}')
+        msg = model.load_state_dict(checkpoint_file, strict=False)
+        print(msg)
+        return model
+
+    model = prepare_model(checkpoint, 'mae_vit_base_patch16')
+    print('Model loaded.')
 
     if rank == 0:
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"\n--> model has {total_params / 1e6} Million params.\n")
 
     # ____________ create batch dataset
-    train_dataset = CombinedDataset(train_dir, split="train", num_frames=3, img_size=224, bands=6,
+    train_dataset = CombinedDataset(train_dir, split="train", num_frames=3, img_size=224, bands=6, cloud_range=cloud_range,
                               # random_cropping=random_cropping, remove_cloud=True, 
                                normalize=False)
     if rank == 0:
@@ -373,7 +404,7 @@ def fsdp_main(args):
     if rank == 0:
         print(f"--> Training set masks = {train_dataset.n_cloudpaths}")
 
-    val_dataset = CombinedDataset(train_dir, split="validate", num_frames=3, img_size=224, bands=6,
+    val_dataset = CombinedDataset(train_dir, split="validate", num_frames=3, img_size=224, bands=6, cloud_range=cloud_range,
                               # random_cropping=random_cropping, remove_cloud=True, 
                                normalize=False)
     if rank == 0:
@@ -383,17 +414,9 @@ def fsdp_main(args):
     
     train_dataset.cloud_catalog.to_csv(os.path.join(job_info_dir, "train_cloud_catalog.csv"), index=False)
     val_dataset.cloud_catalog.to_csv(os.path.join(job_info_dir, "val_cloud_catalog.csv"), index=False)
-    
-  #  train_sampler = DistributedSampler(train_dataset, rank=rank, num_replicas=world_size, shuffle=True)
-  #  val_sampler = DistributedSampler(val_dataset, rank=rank, num_replicas=world_size)
 
-    train_sampler = DistributedSampler(train_dataset, rank=rank, num_replicas=world_size, shuffle=True)
-    val_sampler = DistributedSampler(val_dataset, rank=rank, num_replicas=world_size, shuffle=True)
-
-  #  print('train_sampler')
- #   print(len(train_sampler))
-  #  print(dir(train_sampler))
-
+    train_sampler = torch.utils.data.RandomSampler(train_dataset, replacement=True)
+    val_sampler = torch.utils.data.RandomSampler(val_dataset, replacement=True)
 
     train_kwargs = {"batch_size": batch_size, "sampler": train_sampler}
     test_kwargs = {"batch_size": 1, "sampler": val_sampler}
@@ -408,55 +431,12 @@ def fsdp_main(args):
     train_loader = torch.utils.data.DataLoader(train_dataset, **train_kwargs)
     test_loader = torch.utils.data.DataLoader(val_dataset, **test_kwargs)
 
- #   mask_train_loader = torch.utils.data.DataLoader(mask_train_dataset, **train_kwargs)
-  #  mask_test_loader = torch.utils.data.DataLoader(mask_val_dataset, **test_kwargs)
-
-  #  print('mtd')
-  #  mask_train_loader_list = list(mask_train_loader)
-  #  mask_val_loader_list = list(mask_test_loader)
-  #  print(mask_train_loader_list[0])
-
-
-    # print('combined train_loader')
-    # for i, batch in enumerate(train_loader):
-    #  #   print(i)
-    #  #   print(batch.shape)
-    #     x = batch[:,0,:,:,:,:]
-    #   #  print(x)
-    #   #  print(type(x))
-    #     print(x.shape)
-    #     mask = batch[:,1,:,:,:,:]
-    #    # print(mask)
-    #   #  print(mask.shape)
-    #     #print(mask_train_loader_list[i].shape)
- #   print(len(train_loader))
-  #  print(type(train_loader))
-  #  print(train_loader[0])
-    
-
- #   print('mask loader')
-  #  print(len(mask_train_loader))
-  #  print(len(mask_train_loader[0]))
-    # print('mask_train_dataset')
-    # print(len(mask_train_dataset))
-    # print(mask_train_dataset[0].shape)
-
-    # print('mask_test dataset')
-    # print(len(mask_val_dataset))
-    # print(mask_val_dataset[0].shape)
-          
-    
     torch.cuda.set_device(local_rank)
 
     torch.cuda.empty_cache()
 
     model = model.to(torch.cuda.current_device())
-    model = DDP(model, device_ids=[torch.cuda.current_device()])
-
-    if checkpoint:
-        map_location = {'cuda:%d' % 0: 'cuda:%d' % local_rank}
-        model.load_state_dict(
-            torch.load(checkpoint, map_location=map_location))
+    # model = DDP(model, device_ids=[torch.cuda.current_device()])
 
     # optimizer and learning rate decay
     optimizer = optim.AdamW(model.parameters(), lr=lr)
@@ -504,7 +484,7 @@ def fsdp_main(args):
             print(f"\n--> Starting Epoch {epoch}")
 
             t0 = time.time()
-        train_loss = train(
+        train_loss, train_mask_ratio = train(
             model,
             mask_ratio,
             local_rank,
@@ -519,7 +499,7 @@ def fsdp_main(args):
             vis_path=vis_dir,
         )
 
-        curr_val_loss = validation(model, mask_ratio, local_rank, rank, test_loader)
+        curr_val_loss, val_mask_ratio = validation(model, mask_ratio, local_rank, rank, test_loader)
 
         # Write logs in two formats: tensorboard and csv.
         if rank == 0:
@@ -528,7 +508,7 @@ def fsdp_main(args):
                 "train": train_loss,
                 "test":  curr_val_loss
             }, epoch)
-            log_writer.write(f"{epoch},{scheduler.get_last_lr()[0]},{train_loss},{curr_val_loss}\n")
+            log_writer.write(f"{epoch},{scheduler.get_last_lr()[0]},{train_loss},{curr_val_loss}, {train_mask_ratio}, {val_mask_ratio}\n")
             # flush on each write to avoid log loss due to unexpected exit
             tensorboard_writer.flush()
             log_writer.flush()
