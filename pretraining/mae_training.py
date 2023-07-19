@@ -240,13 +240,13 @@ def train(
    
         scheduler.step()
 
-        if epoch % 10 == 0 and i <= 1:
+        if i <= 1:
             if vis_path is not None:
                 os.makedirs(vis_path, exist_ok=True)
                 torch.save(batch.detach().cpu(), os.path.join(vis_path, f'input_{i}.pt'))
                 torch.save(label_mask_batch.detach().cpu(), os.path.join(vis_path, f'input_mask_{i}.pt'))
-                torch.save(model.module.unpatchify(mask.unsqueeze(-1).repeat(1, 1, pred.shape[-1])).detach().cpu(), os.path.join(vis_path, f'mask_{i}.pt'))
-                torch.save(model.module.unpatchify(pred).detach().cpu(), os.path.join(vis_path, f'pred_{i}.pt'))
+                torch.save(model.unpatchify(mask.unsqueeze(-1).repeat(1, 1, pred.shape[-1])).detach().cpu(), os.path.join(vis_path, f'mask_{i}.pt'))
+                torch.save(model.unpatchify(pred).detach().cpu(), os.path.join(vis_path, f'pred_{i}.pt'))
         # dist.barrier()
 
     # consolidate final loss number - do not use .reduce here, requires global synch
