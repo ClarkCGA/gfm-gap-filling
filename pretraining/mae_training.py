@@ -8,6 +8,8 @@ import torch
 import torch.distributed as dist
 import torch.optim as optim
 import torchvision
+from torchmetrics.image import StructuralSimilarityIndexMeasure
+from torchmetrics.regression import MeanSquaredError
 import tqdm
 import yaml
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -51,7 +53,7 @@ class CombinedDataset(Dataset):
         self.cloud_range = cloud_range
         self.normalize = normalize
 
-        self.tif_paths = self._get_tif_paths()[:32]
+        self.tif_paths = self._get_tif_paths()
         self.cloud_paths, self.cloud_catalog = self._get_cloud_paths()
 
         self.n_cloudpaths = len(self.cloud_paths)
@@ -148,7 +150,7 @@ def visualize_tcc(vis_path, n_epoch, idx, input, input_mask, processed_mask, pre
         reconstruction_list.append(reconstructed_img)
     for t in range(1, n_timesteps+1):
         input_img = input[0,0:3,t-1,:,:].clone().flip(0) * 3
-        input_img = torch.nn.functional.pad(input_masked, (2,2,2,2), value=0)
+        input_img = torch.nn.functional.pad(input_img, (2,2,2,2), value=0)
         groundtruth_list.append(input_img)
     input_list = torch.cat(input_list, dim=1)
     reconstruction_list = torch.cat(reconstruction_list, dim=1)
@@ -202,7 +204,7 @@ def get_args_parser():
                         help='Masking ratio (percentage of removed patches).')
     parser.add_argument('--tubelet_size', default=1, type=int,
                         help='Temporal patch size.')
-    parser.add_argument('--checkpoint', default='', type=str,
+    parser.add_argument('--checkpoint', default='/workspace/gfm-gap-filling/pretraining/epoch-832-loss-0.0473.pt', type=str,
                         help='Path to a checkpoint file to load from.')
 
     # training related
@@ -246,7 +248,11 @@ def train(
     model.train()
     ddp_loss = torch.zeros(2).to(local_rank)
     mask_ratio = torch.zeros(2).to(local_rank)
+    ssim = torch.zeros(2).to('cpu')
+    mse = torch.zeros(2).to('cpu')
 
+    StructuralSimilarity = StructuralSimilarityIndexMeasure(data_range=1.0)
+    mean_squared_error = MeanSquaredError()
     # if sampler:
     #     sampler.set_epoch(epoch)
     inner_pbar = tqdm.tqdm(
@@ -271,11 +277,29 @@ def train(
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
         optimizer.step()
 
-        mask_ratio[0] += torch.mean(mask)
+        mask_ratio[0] += torch.mean(mask) * 3
         mask_ratio[1] += 1
 
         ddp_loss[0] += loss.item()
         ddp_loss[1] += 1
+
+        input = batch.detach().cpu()
+        input_mask = label_mask_batch.detach().cpu()
+        processed_mask = model.unpatchify(mask.unsqueeze(-1).repeat(1, 1, pred.shape[-1])).detach().cpu()
+        predicted = model.unpatchify(pred).detach().cpu()
+        input_masked = input * processed_mask
+        predicted_masked = predicted * processed_mask
+        
+        ssim_score = StructuralSimilarity(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
+
+        ssim[0] += ssim_score
+        ssim[1] += 1
+
+        mse_score = mean_squared_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
+        mse_score /= (torch.mean(mask).detach().cpu() * 3)
+        
+        mse[0] += mse_score
+        mse[1] += 1
 
         inner_pbar.update(1)
         if profiler:
@@ -288,20 +312,27 @@ def train(
     # dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
     train_loss = ddp_loss[0] / ddp_loss[1]
     epoch_mask_ratio = mask_ratio[0] / mask_ratio[1]
+    epoch_ssim = ssim[0] / ssim[1]
+    epoch_mse = mse[0] / mse[1]
     inner_pbar.close()
 
-    print(f"Train Epoch: \t{epoch}, Loss: \t{train_loss:.4f}, Mask Ratio: \t{epoch_mask_ratio:.4f}")
-    return train_loss, epoch_mask_ratio
+    print(f"Train Epoch: \t{epoch}, Loss: \t{train_loss:.4f}, Mask Ratio: \t{epoch_mask_ratio:.4f}, SSIM: {epoch_ssim:.4f}, MSE: {epoch_mse:.4f}")
+    return train_loss, epoch_mask_ratio, epoch_ssim, epoch_mse
 
 
 def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_path):
     model.eval()
     ddp_loss = torch.zeros(2).to(local_rank)
     mask_ratio = torch.zeros(2).to(local_rank)
-    # ssim = torch.zeros(2).to('cpu')
+    ssim = torch.zeros(2).to('cpu')
+    mse = torch.zeros(2).to('cpu')
     inner_pbar = tqdm.tqdm(
         range(len(test_loader)), colour="green", desc="Validation Epoch", leave=True
     )
+    
+    StructuralSimilarity = StructuralSimilarityIndexMeasure(data_range=1.0)
+    mean_squared_error = MeanSquaredError()
+
     with torch.no_grad():
         for i, batch in enumerate(test_loader):
             label_mask_batch = batch[:,1,:,:,:,:]
@@ -324,11 +355,17 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             predicted = model.unpatchify(pred).detach().cpu()
             input_masked = input * processed_mask
             predicted_masked = predicted * processed_mask
-
-            # ssim_score = torchvision.functional.ssim(input_masked[:,:,1,:,:], predicted_masked[:,:,1,:,:])
             
-            # ssim[0] += ssim_score
-            # ssim[1] += 1
+            ssim_score = StructuralSimilarity(predicted_masked[:,:,1,:,:].detach().cpu(), input_masked[:,:,1,:,:].detach().cpu())
+
+            ssim[0] += ssim_score
+            ssim[1] += 1
+  
+            mse_score = mean_squared_error(predicted_masked[:,:,1,:,:].detach().cpu(), input_masked[:,:,1,:,:].detach().cpu())
+            mse_score /= (torch.mean(mask).detach().cpu() * 3)
+            
+            mse[0] += mse_score
+            mse[1] += 1
             
             if i == 8:
                 if vis_path is not None:
@@ -340,11 +377,12 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
     # dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
     val_loss = ddp_loss[0] / ddp_loss[1]
     epoch_mask_ratio = mask_ratio[0] / mask_ratio[1]
-    #epoch_ssim = ssim[0] / ssim[1]
+    epoch_ssim = ssim[0] / ssim[1]
+    epoch_mse = mse[0] / mse[1]
     
     inner_pbar.close()
-    print(f"Validation Loss: {val_loss:.4f}, Mask Ratio: \t{epoch_mask_ratio:.4f}")
-    return val_loss, epoch_mask_ratio #, epoch_ssim
+    print(f"Validation Loss: {val_loss:.4f}, Mask Ratio: \t{epoch_mask_ratio:.4f}, SSIM: {epoch_ssim:.4f}, MSE: {epoch_mse:.4f}")
+    return val_loss, epoch_mask_ratio, epoch_ssim, epoch_mse
 
 
 def fsdp_main(args):
@@ -435,12 +473,16 @@ def fsdp_main(args):
     #              decoder_embed_dim=int(embed_dim/2), decoder_depth=8, decoder_num_heads=num_heads,
     #              mlp_ratio=4., norm_layer=functools.partial(torch.nn.LayerNorm, eps=1e-6), norm_pix_loss=False)
 
-    def prepare_model(arch='mae_vit_base_patch16'):
+    def prepare_model(checkpoint, arch='mae_vit_base_patch16'):
         # build model
         model = getattr(mae.models_mae, arch)()
+        # load model
+        checkpoint_file = torch.load(checkpoint, map_location=f'cuda:{local_rank}')
+        msg = model.load_state_dict(checkpoint_file, strict=False)
+        print(msg)
         return model
 
-    model = prepare_model('mae_vit_base_patch16')
+    model = prepare_model(checkpoint, 'mae_vit_base_patch16')
     print('Model loaded.')
 
     if rank == 0:
@@ -471,7 +513,7 @@ def fsdp_main(args):
     val_sampler = torch.utils.data.SequentialSampler(val_dataset)
 
     train_kwargs = {"batch_size": batch_size, "sampler": train_sampler}
-    test_kwargs = {"batch_size": 1, "sampler": val_sampler}
+    test_kwargs = {"batch_size": batch_size, "sampler": val_sampler}
     common_kwargs = {
         #"num_workers": num_workers,
         "pin_memory": False,
@@ -536,7 +578,7 @@ def fsdp_main(args):
             print(f"\n--> Starting Epoch {epoch}")
 
             t0 = time.time()
-        train_loss, train_mask_ratio = train(
+        train_loss, train_mask_ratio, train_ssim, train_mse = train(
             model,
             mask_ratio,
             local_rank,
@@ -551,7 +593,7 @@ def fsdp_main(args):
             vis_path=vis_dir,
         )
 
-        curr_val_loss, val_mask_ratio = validation(model, mask_ratio, local_rank, rank, test_loader, epoch, vis_path=vis_dir)
+        curr_val_loss, val_mask_ratio, val_ssim, val_mse = validation(model, mask_ratio, local_rank, rank, test_loader, epoch, vis_path=vis_dir)
 
         # Write logs in two formats: tensorboard and csv.
         if rank == 0:
@@ -560,7 +602,7 @@ def fsdp_main(args):
                 "train": train_loss,
                 "test":  curr_val_loss
             }, epoch)
-            log_writer.write(f"{epoch},{scheduler.get_last_lr()[0]},{train_loss},{curr_val_loss}, {train_mask_ratio}, {val_mask_ratio}\n")
+            log_writer.write(f"{epoch},{scheduler.get_last_lr()[0]},{train_loss},{train_mask_ratio},{train_ssim},{curr_val_loss},{train_mse},{val_mask_ratio},{val_ssim},{val_mse}\n")
             # flush on each write to avoid log loss due to unexpected exit
             tensorboard_writer.flush()
             log_writer.flush()
