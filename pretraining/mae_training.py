@@ -7,6 +7,7 @@ import pathlib
 import torch
 import torch.distributed as dist
 import torch.optim as optim
+import torchvision
 import tqdm
 import yaml
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -46,11 +47,11 @@ class CombinedDataset(Dataset):
         self.mask_position = [2]
         self.img_size = img_size
         self.bands = bands
-        self.num_hls_bands = num_hls_bands,
+        self.num_hls_bands = num_hls_bands
         self.cloud_range = cloud_range
         self.normalize = normalize
 
-        self.tif_paths = self._get_tif_paths()
+        self.tif_paths = self._get_tif_paths()[:32]
         self.cloud_paths, self.cloud_catalog = self._get_cloud_paths()
 
         self.n_cloudpaths = len(self.cloud_paths)
@@ -64,7 +65,7 @@ class CombinedDataset(Dataset):
         itemlist = sorted(catalog["chip_id"].tolist())
         pathlist = [self.image_dir.joinpath(f"{item}_merged.tif") for item in itemlist]
         chipslist = list(self.image_dir.glob("*.tif"))
-        truelist = list(set(pathlist) & set(chipslist))
+        truelist = sorted(list(set(pathlist) & set(chipslist)))
         return truelist
 
     # Create list of all paths to clouds
@@ -74,7 +75,7 @@ class CombinedDataset(Dataset):
         itemlist = sorted(catalog["fmask_name"].tolist())
         chipslist = list(self.cloud_dir.glob("*.tif"))
         pathlist = [self.cloud_dir.joinpath(f"{item}") for item in itemlist]
-        truelist = list(set(pathlist) & set(chipslist))
+        truelist = sorted(list(set(pathlist) & set(chipslist)))
         return truelist, catalog
     
     def __len__(self):
@@ -101,11 +102,19 @@ class CombinedDataset(Dataset):
         cloudbrick = np.zeros_like(groundtruth)
 
         # For every specified mask position, read in a random cloud scene and add to the block of cloud masks
-        for p in self.mask_position:
-            cloudscene = read_tif_as_np_array(self.cloud_paths[np.random.randint(0,self.n_cloudpaths-1)])
-            cloudscene = np.expand_dims(cloudscene, 0)
-            cloudbrick[p-1,:,:,:] = cloudscene # Check if this works, the code should assign cloud scene to ALL these values in the 4 channels indexed.
-            del cloudscene
+        if self.split == "train":
+            for p in self.mask_position:
+                cloudscene = read_tif_as_np_array(self.cloud_paths[np.random.randint(0,self.n_cloudpaths-1)])
+                cloudscene = np.expand_dims(cloudscene, 0)
+                cloudbrick[p-1,:,:,:] = cloudscene # Check if this works, the code should assign cloud scene to ALL these values in the 4 channels indexed.
+                del cloudscene
+
+        if self.split == "validate":
+            for p in self.mask_position:
+                cloudscene = read_tif_as_np_array(self.cloud_paths[index % self.n_cloudpaths])
+                cloudscene = np.expand_dims(cloudscene, 0)
+                cloudbrick[p-1,:,:,:] = cloudscene # Check if this works, the code should assign cloud scene to ALL these values in the 4 channels indexed.
+                del cloudscene
 
         cloudbrick = np.expand_dims(cloudbrick, 0) # Adds a dimension at index 0
         groundtruth = np.expand_dims(groundtruth, 0) 
@@ -114,7 +123,41 @@ class CombinedDataset(Dataset):
 
         # A tensor with dimensions (mask-or-image, bands, time steps, height, width)
         return combined_data
-  
+
+def visualize_tcc(vis_path, n_epoch, idx, input, input_mask, processed_mask, predicted):
+
+    n_timesteps = input.size()[2]
+    input_list = []
+    reconstruction_list = []
+    groundtruth_list = []
+    "torch.Size([1, 6, 3, 224, 224])"
+    for t in range(1, n_timesteps+1):
+        input_img = input[0,0:3,t-1,:,:].clone().flip(0) * 3
+        input_mask_img = input_mask[0,0:3,t-1,:,:].clone()
+        input_masked = torch.where(input_mask_img == 1, input_mask_img, input_img)
+        input_masked = torch.nn.functional.pad(input_masked, (2,2,2,2), value=0)
+        input_list.append(input_masked)
+    for t in range(1, n_timesteps+1):
+        processed_mask_img = processed_mask[0,0:3,t-1,:,:].clone()
+        predicted_img = predicted[0,0:3,t-1,:,:].clone().flip(0) * 3
+        input_img = input[0,0:3,t-1,:,:].clone().flip(0) * 3
+        predicted_unmasked = predicted_img * processed_mask_img
+        input_masked = input_img * (1-processed_mask_img)
+        reconstructed_img = predicted_unmasked + input_masked
+        reconstructed_img = torch.nn.functional.pad(reconstructed_img, (2,2,2,2), value=0)
+        reconstruction_list.append(reconstructed_img)
+    for t in range(1, n_timesteps+1):
+        input_img = input[0,0:3,t-1,:,:].clone().flip(0) * 3
+        input_img = torch.nn.functional.pad(input_masked, (2,2,2,2), value=0)
+        groundtruth_list.append(input_img)
+    input_list = torch.cat(input_list, dim=1)
+    reconstruction_list = torch.cat(reconstruction_list, dim=1)
+    groundtruth_list = torch.cat(groundtruth_list, dim=1)
+    full_vis = torch.cat([input_list]+[reconstruction_list]+[groundtruth_list], dim=2)
+    torchvision.utils.save_image(
+        full_vis, os.path.join(vis_path, "epoch{:04}_idx{:04}_gen.jpg".format(n_epoch, idx)),
+    )
+
 def get_args_parser():
     parser = argparse.ArgumentParser('MAE pre-training', add_help=False)
 
@@ -159,7 +202,7 @@ def get_args_parser():
                         help='Masking ratio (percentage of removed patches).')
     parser.add_argument('--tubelet_size', default=1, type=int,
                         help='Temporal patch size.')
-    parser.add_argument('--checkpoint', default='/workspace/gfm-gap-filling/pretraining/epoch-832-loss-0.0473.pt', type=str,
+    parser.add_argument('--checkpoint', default='', type=str,
                         help='Path to a checkpoint file to load from.')
 
     # training related
@@ -240,14 +283,6 @@ def train(
    
         scheduler.step()
 
-        if i <= 1:
-            if vis_path is not None:
-                os.makedirs(vis_path, exist_ok=True)
-                torch.save(batch.detach().cpu(), os.path.join(vis_path, f'input_{i}.pt'))
-                torch.save(label_mask_batch.detach().cpu(), os.path.join(vis_path, f'input_mask_{i}.pt'))
-                torch.save(model.unpatchify(mask.unsqueeze(-1).repeat(1, 1, pred.shape[-1])).detach().cpu(), os.path.join(vis_path, f'mask_{i}.pt'))
-                torch.save(model.unpatchify(pred).detach().cpu(), os.path.join(vis_path, f'pred_{i}.pt'))
-        # dist.barrier()
 
     # consolidate final loss number - do not use .reduce here, requires global synch
     # dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
@@ -259,10 +294,11 @@ def train(
     return train_loss, epoch_mask_ratio
 
 
-def validation(model,  mask_ratio, local_rank, rank, test_loader):
+def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_path):
     model.eval()
     ddp_loss = torch.zeros(2).to(local_rank)
     mask_ratio = torch.zeros(2).to(local_rank)
+    # ssim = torch.zeros(2).to('cpu')
     inner_pbar = tqdm.tqdm(
         range(len(test_loader)), colour="green", desc="Validation Epoch", leave=True
     )
@@ -274,21 +310,41 @@ def validation(model,  mask_ratio, local_rank, rank, test_loader):
           #  label_mask_batch = mask_val_loader_list[i]
             loss, pred, mask = model(batch.to(local_rank), label_mask_batch.to(local_rank), mask_ratio)
 
-            mask_ratio[0] += torch.mean(mask)
+            mask_ratio[0] += torch.mean(mask) * 3 # Adjust to only one mask position
             mask_ratio[1] += 1
             
             ddp_loss[0] += loss.item()  # sum up batch loss
             ddp_loss[1] += 1
 
             inner_pbar.update(1)
+            
+            input = batch.detach().cpu()
+            input_mask = label_mask_batch.detach().cpu()
+            processed_mask = model.unpatchify(mask.unsqueeze(-1).repeat(1, 1, pred.shape[-1])).detach().cpu()
+            predicted = model.unpatchify(pred).detach().cpu()
+            input_masked = input * processed_mask
+            predicted_masked = predicted * processed_mask
+
+            # ssim_score = torchvision.functional.ssim(input_masked[:,:,1,:,:], predicted_masked[:,:,1,:,:])
+            
+            # ssim[0] += ssim_score
+            # ssim[1] += 1
+            
+            if i == 8:
+                if vis_path is not None:
+                    os.makedirs(vis_path, exist_ok=True)
+                    visualize_tcc(vis_path, n_epoch, i, input, input_mask, processed_mask, predicted)
+
+        # dist.barrier()
 
     # dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
     val_loss = ddp_loss[0] / ddp_loss[1]
     epoch_mask_ratio = mask_ratio[0] / mask_ratio[1]
+    #epoch_ssim = ssim[0] / ssim[1]
     
     inner_pbar.close()
     print(f"Validation Loss: {val_loss:.4f}, Mask Ratio: \t{epoch_mask_ratio:.4f}")
-    return val_loss, epoch_mask_ratio
+    return val_loss, epoch_mask_ratio #, epoch_ssim
 
 
 def fsdp_main(args):
@@ -379,16 +435,12 @@ def fsdp_main(args):
     #              decoder_embed_dim=int(embed_dim/2), decoder_depth=8, decoder_num_heads=num_heads,
     #              mlp_ratio=4., norm_layer=functools.partial(torch.nn.LayerNorm, eps=1e-6), norm_pix_loss=False)
 
-    def prepare_model(checkpoint, arch='mae_vit_base_patch16'):
+    def prepare_model(arch='mae_vit_base_patch16'):
         # build model
         model = getattr(mae.models_mae, arch)()
-        # load model
-        checkpoint_file = torch.load(checkpoint, map_location=f'cuda:{local_rank}')
-        msg = model.load_state_dict(checkpoint_file, strict=False)
-        print(msg)
         return model
 
-    model = prepare_model(checkpoint, 'mae_vit_base_patch16')
+    model = prepare_model('mae_vit_base_patch16')
     print('Model loaded.')
 
     if rank == 0:
@@ -416,7 +468,7 @@ def fsdp_main(args):
     val_dataset.cloud_catalog.to_csv(os.path.join(job_info_dir, "val_cloud_catalog.csv"), index=False)
 
     train_sampler = torch.utils.data.RandomSampler(train_dataset, replacement=True)
-    val_sampler = torch.utils.data.RandomSampler(val_dataset, replacement=True)
+    val_sampler = torch.utils.data.SequentialSampler(val_dataset)
 
     train_kwargs = {"batch_size": batch_size, "sampler": train_sampler}
     test_kwargs = {"batch_size": 1, "sampler": val_sampler}
@@ -499,7 +551,7 @@ def fsdp_main(args):
             vis_path=vis_dir,
         )
 
-        curr_val_loss, val_mask_ratio = validation(model, mask_ratio, local_rank, rank, test_loader)
+        curr_val_loss, val_mask_ratio = validation(model, mask_ratio, local_rank, rank, test_loader, epoch, vis_path=vis_dir)
 
         # Write logs in two formats: tensorboard and csv.
         if rank == 0:
@@ -529,7 +581,7 @@ def fsdp_main(args):
         if curr_val_loss < best_val_loss:
             if rank == 0:
                 print(f"--> saving model ...")
-                filename = f"epoch-{epoch}-loss-{round(curr_val_loss.item(), 4)}.pt"
+                filename = "model_best.pt"
                 checkpoint_file = os.path.join(ckpt_dir, filename)
                 os.makedirs(ckpt_dir, exist_ok=True)
                 torch.save(model.state_dict(), checkpoint_file)
