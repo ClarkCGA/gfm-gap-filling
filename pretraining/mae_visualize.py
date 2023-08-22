@@ -10,6 +10,7 @@ import torch.optim as optim
 import torchvision
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 from torchmetrics.regression import MeanSquaredError
+from torchmetrics.regression import MeanAbsoluteError
 import tqdm
 import yaml
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -133,7 +134,7 @@ class CombinedDataset(Dataset):
         # A tensor with dimensions (mask-or-image, bands, time steps, height, width)
         return combined_data
 
-def visualize_tcc(vis_path, n_epoch, idx, input, input_mask, processed_mask, predicted):
+def visualize_tcc(vis_path, idx, input, input_mask, processed_mask, predicted):
 
     n_timesteps = input.size()[2]
     input_list = []
@@ -147,7 +148,7 @@ def visualize_tcc(vis_path, n_epoch, idx, input, input_mask, processed_mask, pre
         input_masked = torch.nn.functional.pad(input_masked, (2,2,2,2), value=0)
         input_list.append(input_masked)
     for t in range(1, n_timesteps+1):
-        processed_mask_img = processed_mask[0,0:3,t-1,:,:].clone()
+        processed_mask_img = input_mask[0,0:3,t-1,:,:].clone()
         predicted_img = predicted[0,0:3,t-1,:,:].clone().flip(0) * 3
         input_img = input[0,0:3,t-1,:,:].clone().flip(0) * 3
         predicted_unmasked = predicted_img * processed_mask_img
@@ -164,7 +165,7 @@ def visualize_tcc(vis_path, n_epoch, idx, input, input_mask, processed_mask, pre
     groundtruth_list = torch.cat(groundtruth_list, dim=1)
     full_vis = torch.cat([input_list]+[reconstruction_list]+[groundtruth_list], dim=2)
     torchvision.utils.save_image(
-        full_vis, os.path.join(vis_path, "epoch{:04}_idx{:04}_gen.jpg".format(n_epoch, idx)),
+        full_vis, os.path.join(vis_path, "idx{:04}_gen.jpg".format(idx)),
     )
 
 def get_args_parser():
@@ -215,6 +216,8 @@ def get_args_parser():
                         help='Temporal patch size.')
     parser.add_argument('--checkpoint', default='/workspace/gfm-gap-filling/pretraining/epoch-832-loss-0.0473.pt', type=str,
                         help='Path to a checkpoint file to load from.')
+    parser.add_argument('--job_id', default='default', type=str,
+                        help='Path to a job id to load from.')
 
     # training related
     parser.add_argument('--batch_size', default=512, type=int,
@@ -239,104 +242,13 @@ def get_args_parser():
 
     return parser
 
-
-def train(
-        model,
-        mask_ratio,
-        local_rank,
-        rank,
-        train_loader,
-     #   mask_train_loader_list,
-        optimizer,
-        epoch,
-        sampler=None,
-        profiler=None,
-        scheduler=None,
-        vis_path=None,
-):
-    model.train()
-    ddp_loss = torch.zeros(2).to(local_rank)
-    mask_ratio = torch.zeros(2).to(local_rank)
-    ssim = torch.zeros(2).to('cpu')
-    mse = torch.zeros(2).to('cpu')
-    mean = torch.tensor([495.7316,  814.1386,  924.5740, 2962.5623, 2640.8833, 1740.3031])[None,:,None,None,None].to('cpu')
-    std = torch.tensor([286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625])[None,:,None,None,None].to('cpu')
-    StructuralSimilarity = StructuralSimilarityIndexMeasure(data_range=1.0)
-    mean_squared_error = MeanSquaredError()
-    # if sampler:
-    #     sampler.set_epoch(epoch)
-    inner_pbar = tqdm.tqdm(
-        range(len(train_loader)), colour="blue", desc="Training Epoch", leave=True
-    )
-    # start = time.time()
-    for i, batch in enumerate(train_loader):
-
-        label_mask_batch = batch[:,1,:,:,:,:]
-
-        batch = batch[:,0,:,:,:,:]
-
-
-        
-        optimizer.zero_grad()
-
-       # label_mask_batch = mask_train_loader_list[i]
-
-        loss, pred, mask = model(batch.to(local_rank), label_mask_batch.to(local_rank), mask_ratio)
-
-        loss.backward()
-        torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
-        optimizer.step()
-
-        mask_ratio[0] += torch.mean(mask) * 3
-        mask_ratio[1] += 1
-
-        ddp_loss[0] += loss.item()
-        ddp_loss[1] += 1
-
-        input = (batch.detach().cpu() * std + mean) * 0.0001
-        input_mask = label_mask_batch.detach().cpu()
-        processed_mask = model.unpatchify(mask.unsqueeze(-1).repeat(1, 1, pred.shape[-1])).detach().cpu()
-        predicted = (model.unpatchify(pred).detach().cpu() * std + mean) * 0.0001
-        input_masked = input * processed_mask
-        predicted_masked = predicted * processed_mask
-        
-        
-        ssim_score = StructuralSimilarity(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
-
-        ssim[0] += ssim_score
-        ssim[1] += 1
-
-        mse_score = mean_squared_error(predicted_masked, input_masked)
-        mse_score /= (torch.mean(mask).detach().cpu())
-        
-        mse[0] += mse_score
-        mse[1] += 1
-
-        inner_pbar.update(1)
-        if profiler:
-            profiler.step()
-   
-        scheduler.step()
-
-
-    # consolidate final loss number - do not use .reduce here, requires global synch
-    # dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
-    train_loss = ddp_loss[0] / ddp_loss[1]
-    epoch_mask_ratio = mask_ratio[0] / mask_ratio[1]
-    epoch_ssim = ssim[0] / ssim[1]
-    epoch_mse = mse[0] / mse[1]
-    inner_pbar.close()
-
-    print(f"Train Epoch: \t{epoch}, Loss: \t{train_loss:.4f}, Mask Ratio: \t{epoch_mask_ratio:.4f}, SSIM: {epoch_ssim:.4f}, MSE: {epoch_mse:.4f}")
-    return train_loss, epoch_mask_ratio, epoch_ssim, epoch_mse
-
-
 def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_path):
     model.eval()
     ddp_loss = torch.zeros(2).to(local_rank)
     mask_ratio = torch.zeros(2).to(local_rank)
     ssim = torch.zeros(2).to('cpu')
     mse = torch.zeros(2).to('cpu')
+    mae = torch.zeros(2).to('cpu')
     mean = torch.tensor([495.7316,  814.1386,  924.5740, 2962.5623, 2640.8833, 1740.3031])[None,:,None,None,None].to('cpu')
     std = torch.tensor([286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625])[None,:,None,None,None].to('cpu')
     inner_pbar = tqdm.tqdm(
@@ -345,6 +257,7 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
     
     StructuralSimilarity = StructuralSimilarityIndexMeasure(data_range=1.0)
     mean_squared_error = MeanSquaredError()
+    mean_abs_error = MeanAbsoluteError()
 
     data_list = [] 
 
@@ -368,8 +281,11 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             input_mask = label_mask_batch.detach().cpu()
             processed_mask = model.unpatchify(mask.unsqueeze(-1).repeat(1, 1, pred.shape[-1])).detach().cpu()
             predicted = (model.unpatchify(pred).detach().cpu() * std + mean) * 0.0001
-            input_masked = input * processed_mask
-            predicted_masked = predicted * processed_mask
+            input_masked = input * input_mask
+            predicted_masked = predicted * input_mask
+
+            if i % 80 == 0:
+                visualize_tcc(vis_path, i, input, input_mask, processed_mask, predicted)
             
             ssim_score = StructuralSimilarity(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
 
@@ -382,7 +298,14 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             mse[0] += mse_score
             mse[1] += 1
 
+            mae_score = mean_abs_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
+            mae_score /= (torch.mean(processed_mask[:,:,1,:,:]))
+        
+            mae[0] += mae_score
+            mae[1] += 1
+
             per_band_mse_list = []
+            per_band_mae_list = []
             per_band_ssim_list = []
 
             for n in range(6): # For each band of 6, do the following:
@@ -392,6 +315,12 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
                 per_band_mse /= (torch.mean(mask).detach().cpu())
                 # Append to the list of per band mse for this batch
                 per_band_mse_list.append(per_band_mse.item())
+                # Get the MAE for only that band, selected with n, from the predicted and input, masked with the cloud mask.
+                per_band_mae = mean_abs_error(predicted_masked[:,n:n+1,:,:,:], input_masked[:,n:n+1,:,:,:])
+                # Adjust the mae by the proportion of masked pixels.
+                per_band_mae /= (torch.mean(mask).detach().cpu())
+                # Append to the list of per band mae for this batch
+                per_band_mae_list.append(per_band_mae.item())
                 # Get the SSIM for only that band at the middle time step.
                 per_band_ssim_score = StructuralSimilarity(predicted_masked[:,n:n+1,1,:,:], input_masked[:,n:n+1,1,:,:])
                 # Append to the list of per band SSIM for this batch
@@ -399,7 +328,8 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
 
             # Append a dictionary representing this batch's stats, to be compiled into a dataframe
             data_list.append({'Overall SSIM':ssim_score.item(), 
-                              'Overall MSE':mse_score.item(), 
+                              'Overall MSE':mse_score.item(),
+                              'Overall MAE':mae_score.item(),
                               'Mask Ratio':torch.mean(mask).item() * 3,
                               'B02 MSE': per_band_mse_list[0],
                               'B03 MSE': per_band_mse_list[1],
@@ -407,6 +337,12 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
                               'B05 MSE': per_band_mse_list[3],
                               'B07 MSE': per_band_mse_list[4],
                               'B08 MSE': per_band_mse_list[5],
+                              'B02 MAE': per_band_mae_list[0],
+                              'B03 MAE': per_band_mae_list[1],
+                              'B04 MAE': per_band_mae_list[2],
+                              'B05 MAE': per_band_mae_list[3],
+                              'B07 MAE': per_band_mae_list[4],
+                              'B08 MAE': per_band_mae_list[5],
                               'B02 SSIM': per_band_ssim_list[0],
                               'B03 SSIM': per_band_ssim_list[1],
                               'B04 SSIM': per_band_ssim_list[2],
@@ -466,14 +402,12 @@ def fsdp_main(args):
     mask_ratio = args.mask_ratio
     tubelet_size = args.tubelet_size
     checkpoint = args.checkpoint
+    job_id = args.job_id
 
     # training related
     batch_size = args.batch_size
     lr = args.lr
     epochs = args.num_epochs
-
-    # logging related
-    job_id = f"{time.strftime('%Y-%m-%d_%H-%M-%S')}"
 
     ckpt_dir = os.path.join(args.base_checkpoint_dir, job_id)
     vis_dir = os.path.join(args.base_visualization_dir, job_id)
@@ -496,30 +430,9 @@ def fsdp_main(args):
 
     os.makedirs(job_info_dir, exist_ok=True)
     os.makedirs(csv_log_dir, exist_ok=True)
-    with open(os.path.join(job_info_dir, f'{job_id}.yaml'), 'w') as f:
+    os.makedirs(vis_dir, exist_ok=True)
+    with open(os.path.join(job_info_dir, f'{job_id}_visualization.yaml'), 'w') as f:
         yaml.safe_dump(params_dict, f, default_flow_style=None, sort_keys=False)
-    
-
-    # set seed in a way that:
-    # 1. ensure reproducibility
-    # 2. make sure each gpu has different seed to make sure different
-    # gpus crop the same images randomly
-    random.seed(2022)
-    torch.cuda.manual_seed(2022)
-    torch.manual_seed(2022)
-
-    # distributed setup
-    # dist.init_process_group("nccl")
-    # os.environ["TORCH_SHOW_CPP_STACKTRACES"] = str(1)
-    # os.environ["NCCL_ASYNC_ERROR_HANDLING"] = str(1)
-    # os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
-
-    # create model
-    # model = MaskedAutoencoderViT(img_size=img_size, patch_size=patch_size,
-    #              num_frames=num_frames, tubelet_size=tubelet_size,
-    #              in_chans=6, embed_dim=embed_dim, depth=num_layers, num_heads=num_heads,
-    #              decoder_embed_dim=int(embed_dim/2), decoder_depth=8, decoder_num_heads=num_heads,
-    #              mlp_ratio=4., norm_layer=functools.partial(torch.nn.LayerNorm, eps=1e-6), norm_pix_loss=False)
 
     def prepare_model(checkpoint, arch='mae_vit_base_patch16'):
         # build model
@@ -537,15 +450,6 @@ def fsdp_main(args):
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"\n--> model has {total_params / 1e6} Million params.\n")
 
-    # ____________ create batch dataset
-    train_dataset = CombinedDataset(train_dir, split="train", num_frames=3, img_size=224, bands=6, cloud_range=cloud_range,
-                              # random_cropping=random_cropping, remove_cloud=True, 
-                               normalize=True, training_length=training_length)
-    if rank == 0:
-        print(f"--> Training set len = {len(train_dataset)}")
-    if rank == 0:
-        print(f"--> Training set masks = {train_dataset.n_cloudpaths}")
-
     val_dataset = CombinedDataset(train_dir, split="validate", num_frames=3, img_size=224, bands=6, cloud_range=cloud_range,
                               # random_cropping=random_cropping, remove_cloud=True, 
                                normalize=True)
@@ -553,26 +457,19 @@ def fsdp_main(args):
         print(f"--> Validation set len = {len(val_dataset)}")
     if rank == 0:
         print(f"--> Validation set masks = {val_dataset.n_cloudpaths}")
-    
-    train_dataset.cloud_catalog.to_csv(os.path.join(csv_log_dir, "train_cloud_catalog.csv"), index=False)
-    val_dataset.cloud_catalog.to_csv(os.path.join(csv_log_dir, "val_cloud_catalog.csv"), index=False)
 
     val_chip_dataframe = pd.DataFrame(val_dataset.tif_catalog)
-
-    train_sampler = torch.utils.data.RandomSampler(train_dataset, replacement=True)
     val_sampler = torch.utils.data.SequentialSampler(val_dataset)
 
-    train_kwargs = {"batch_size": batch_size, "sampler": train_sampler}
     test_kwargs = {"batch_size": batch_size, "sampler": val_sampler}
     common_kwargs = {
         #"num_workers": num_workers,
         "pin_memory": False,
         "drop_last": True
     }
-    train_kwargs.update(common_kwargs)
+
     test_kwargs.update(common_kwargs)
 
-    train_loader = torch.utils.data.DataLoader(train_dataset, **train_kwargs)
     test_loader = torch.utils.data.DataLoader(val_dataset, **test_kwargs)
 
     torch.cuda.set_device(local_rank)
@@ -580,46 +477,6 @@ def fsdp_main(args):
     torch.cuda.empty_cache()
 
     model = model.to(torch.cuda.current_device())
-    # model = DDP(model, device_ids=[torch.cuda.current_device()])
-
-    # optimizer and learning rate decay
-    optimizer = optim.AdamW(model.parameters(), lr=lr)
-    scheduler = OneCycleLR(optimizer, max_lr=lr*10, steps_per_epoch=len(train_loader), epochs=epochs)
-
-    best_val_loss = float("inf")
-
-    # --- main training loop
-    if rank == 0:
-        dur = []
-        train_acc_tracking = []
-        val_acc_tracking = []
-        dq = deque(maxlen=3)
-        training_start_time = time.time()
-
-    # torch profiler
-    torch_profiler = torch.profiler.profile(
-        activities=[
-            torch.profiler.ProfilerActivity.CPU,
-            torch.profiler.ProfilerActivity.CUDA,
-        ],
-        schedule=torch.profiler.schedule(wait=1, warmup=2, active=3, repeat=1),
-        on_trace_ready=torch.profiler.tensorboard_trace_handler(
-            "profile_traces"
-        ),
-        profile_memory=True,
-        with_stack=False,
-        record_shapes=True,
-    )
-    torch_profiler = None
-
-    # Log Writers
-    if rank == 0:
-        tensorboard_writer = SummaryWriter(tensorboard_log_dir)
-        os.makedirs(csv_log_dir, exist_ok=True)
-        log_writer = open(os.path.join(csv_log_dir, "summary.txt"), "a")
-
-    if rank == 0:
-        mem_alloc_tracker = []
 
     # -- Start Training -----
     for epoch in range(1, epochs + 1):
@@ -628,8 +485,6 @@ def fsdp_main(args):
         stats_df = pd.DataFrame(data_list)
         chip_stats_df = pd.concat([val_chip_dataframe.reset_index(drop=True), stats_df.reset_index(drop=True)], axis=1)
         chip_stats_df.to_csv(os.path.join(csv_log_dir, "chip_stats.csv"), index=False)
-        stats_df.to_csv(os.path.join(csv_log_dir, "stats_df.csv"), index=False)
-        val_chip_dataframe.to_csv(os.path.join(csv_log_dir, "val_chips.csv"), index=False)
 
 
     # all done, set barrier to ensure all GPU's complete, and then cleanup

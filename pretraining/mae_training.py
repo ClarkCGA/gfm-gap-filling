@@ -10,6 +10,7 @@ import torch.optim as optim
 import torchvision
 from torchmetrics.image import StructuralSimilarityIndexMeasure
 from torchmetrics.regression import MeanSquaredError
+from torchmetrics.regression import MeanAbsoluteError
 import tqdm
 import yaml
 from torch.nn.parallel import DistributedDataParallel as DDP
@@ -56,12 +57,7 @@ class CombinedDataset(Dataset):
         if self.split == "validate":
             self.cloud_range = [0.01,1.0]
         self.normalize = normalize
-
-        self.tif_paths = self._get_tif_paths()
-        if self.split == "train":
-            self.tif_paths = self._get_tif_paths()[:self.training_length]
-        if self.split == "validate":
-            self.tif_paths = self._get_tif_paths()
+        self.tif_paths, self.tif_catalog = self._get_tif_paths()
         self.cloud_paths, self.cloud_catalog = self._get_cloud_paths()
 
         self.n_cloudpaths = len(self.cloud_paths)
@@ -72,15 +68,20 @@ class CombinedDataset(Dataset):
     def _get_tif_paths(self):
         csv = pd.read_csv(self.root_dir.joinpath("final_chip_tracker.csv"))
         catalog = csv.loc[(csv["usage"] == self.split) & (csv["bad_pct_max"] < 5) & (csv["na_count"] == 0)]
-        itemlist = sorted(catalog["chip_id"].tolist())
+        if self.split == "train":
+            catalog_subset = catalog.sample(n=self.training_length)
+        else:
+            catalog_subset = catalog
+        itemlist = sorted(catalog_subset["chip_id"].tolist())
         pathlist = [self.image_dir.joinpath(f"{item}_merged.tif") for item in itemlist]
         chipslist = list(self.image_dir.glob("*.tif"))
         truelist = sorted(list(set(pathlist) & set(chipslist)))
-        return truelist
+        sorted_catalog = catalog_subset.sort_values(by="chip_id", ascending=True)
+        return truelist, sorted_catalog
 
     # Create list of all paths to clouds
     def _get_cloud_paths(self):
-        csv = pd.read_csv(self.root_dir.joinpath("fmask_tracker.csv"))
+        csv = pd.read_csv(self.root_dir.joinpath("fmask_tracker_balanced.csv"))
         catalog = csv.loc[(csv["usage"] == self.split) & (csv["cloud_pct"] <= self.cloud_range[1]) & (csv["cloud_pct"] >= self.cloud_range[0])]
         itemlist = sorted(catalog["fmask_name"].tolist())
         chipslist = list(self.cloud_dir.glob("*.tif"))
@@ -258,12 +259,14 @@ def train(
     model.train()
     ddp_loss = torch.zeros(2).to(local_rank)
     mask_ratio = torch.zeros(2).to(local_rank)
-    ssim = torch.zeros(2).to('cpu')
-    mse = torch.zeros(2).to('cpu')
-    mean = torch.tensor([495.7316,  814.1386,  924.5740, 2962.5623, 2640.8833, 1740.3031])[None,:,None,None,None].to('cpu')
-    std = torch.tensor([286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625])[None,:,None,None,None].to('cpu')
-    StructuralSimilarity = StructuralSimilarityIndexMeasure(data_range=1.0)
-    mean_squared_error = MeanSquaredError()
+    ssim = torch.zeros(2).to(local_rank)
+    mse = torch.zeros(2).to(local_rank)
+    mae = torch.zeros(2).to(local_rank)
+    mean = torch.tensor([495.7316,  814.1386,  924.5740, 2962.5623, 2640.8833, 1740.3031])[None,:,None,None,None].to(local_rank)
+    std = torch.tensor([286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625])[None,:,None,None,None].to(local_rank)
+    StructuralSimilarity = StructuralSimilarityIndexMeasure(data_range=1.0).to(local_rank)
+    mean_squared_error = MeanSquaredError().to(local_rank)
+    mean_abs_error = MeanAbsoluteError().to(local_rank)
     # if sampler:
     #     sampler.set_epoch(epoch)
     inner_pbar = tqdm.tqdm(
@@ -272,9 +275,9 @@ def train(
     # start = time.time()
     for i, batch in enumerate(train_loader):
 
-        label_mask_batch = batch[:,1,:,:,:,:]
+        label_mask_batch = batch[:,1,:,:,:,:].to(local_rank)
 
-        batch = batch[:,0,:,:,:,:]
+        batch = batch[:,0,:,:,:,:].to(local_rank)
 
 
         
@@ -282,7 +285,7 @@ def train(
 
        # label_mask_batch = mask_train_loader_list[i]
 
-        loss, pred, mask = model(batch.to(local_rank), label_mask_batch.to(local_rank), mask_ratio)
+        loss, pred, mask = model(batch, label_mask_batch, mask_ratio)
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
@@ -294,24 +297,29 @@ def train(
         ddp_loss[0] += loss.item()
         ddp_loss[1] += 1
 
-        input = (batch.detach().cpu() * std + mean) * 0.0001
-        input_mask = label_mask_batch.detach().cpu()
-        processed_mask = model.unpatchify(mask.unsqueeze(-1).repeat(1, 1, pred.shape[-1])).detach().cpu()
-        predicted = (model.unpatchify(pred).detach().cpu() * std + mean) * 0.0001
-        input_masked = input * processed_mask
-        predicted_masked = predicted * processed_mask
+        input = (batch.detach() * std + mean) * 0.0001
+        input_mask = label_mask_batch.detach()
+        predicted = (model.unpatchify(pred).detach() * std + mean) * 0.0001
+        input_masked = input * input_mask
+        predicted_masked = predicted * input_mask
         
         
         ssim_score = StructuralSimilarity(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
 
-        ssim[0] += ssim_score
+        ssim[0] += ssim_score.item()
         ssim[1] += 1
 
-        mse_score = mean_squared_error(predicted_masked, input_masked)
-        mse_score /= (torch.mean(mask).detach().cpu())
+        mse_score = mean_squared_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
+        mse_score /= (torch.mean(input_mask[:,:,1,:,:]))
         
-        mse[0] += mse_score
+        mse[0] += mse_score.item()
         mse[1] += 1
+
+        mae_score = mean_abs_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
+        mae_score /= (torch.mean(input_mask[:,:,1,:,:]))
+        
+        mae[0] += mae_score.item()
+        mae[1] += 1
 
         inner_pbar.update(1)
         if profiler:
@@ -326,34 +334,37 @@ def train(
     epoch_mask_ratio = mask_ratio[0] / mask_ratio[1]
     epoch_ssim = ssim[0] / ssim[1]
     epoch_mse = mse[0] / mse[1]
+    epoch_mae = mae[0] / mae [1]
     inner_pbar.close()
 
-    print(f"Train Epoch: \t{epoch}, Loss: \t{train_loss:.4f}, Mask Ratio: \t{epoch_mask_ratio:.4f}, SSIM: {epoch_ssim:.4f}, MSE: {epoch_mse:.4f}")
-    return train_loss, epoch_mask_ratio, epoch_ssim, epoch_mse
+    print(f"Train Epoch: \t{epoch}, Loss: \t{train_loss:.4f}, Mask Ratio: \t{epoch_mask_ratio:.4f}, SSIM: {epoch_ssim:.4f}, MSE: {epoch_mse:.4f}, MAE: {epoch_mae:.4f}")
+    return train_loss, epoch_mask_ratio, epoch_ssim, epoch_mse, epoch_mae
 
 
 def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_path):
     model.eval()
     ddp_loss = torch.zeros(2).to(local_rank)
     mask_ratio = torch.zeros(2).to(local_rank)
-    ssim = torch.zeros(2).to('cpu')
-    mse = torch.zeros(2).to('cpu')
-    mean = torch.tensor([495.7316,  814.1386,  924.5740, 2962.5623, 2640.8833, 1740.3031])[None,:,None,None,None].to('cpu')
-    std = torch.tensor([286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625])[None,:,None,None,None].to('cpu')
+    ssim = torch.zeros(2).to(local_rank)
+    mse = torch.zeros(2).to(local_rank)
+    mae = torch.zeros(2).to(local_rank)
+    mean = torch.tensor([495.7316,  814.1386,  924.5740, 2962.5623, 2640.8833, 1740.3031])[None,:,None,None,None].to(local_rank)
+    std = torch.tensor([286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625])[None,:,None,None,None].to(local_rank)
     inner_pbar = tqdm.tqdm(
         range(len(test_loader)), colour="green", desc="Validation Epoch", leave=True
     )
     
-    StructuralSimilarity = StructuralSimilarityIndexMeasure(data_range=1.0)
-    mean_squared_error = MeanSquaredError()
+    StructuralSimilarity = StructuralSimilarityIndexMeasure(data_range=1.0).to(local_rank)
+    mean_squared_error = MeanSquaredError().to(local_rank)
+    mean_abs_error = MeanAbsoluteError().to(local_rank)
 
     with torch.no_grad():
         for i, batch in enumerate(test_loader):
-            label_mask_batch = batch[:,1,:,:,:,:]
+            label_mask_batch = batch[:,1,:,:,:,:].to(local_rank)
 
-            batch = batch[:,0,:,:,:,:]
+            batch = batch[:,0,:,:,:,:].to(local_rank)
           #  label_mask_batch = mask_val_loader_list[i]
-            loss, pred, mask = model(batch.to(local_rank), label_mask_batch.to(local_rank), mask_ratio)
+            loss, pred, mask = model(batch, label_mask_batch, mask_ratio)
 
             mask_ratio[0] += torch.mean(mask) * 3 # Adjust to only one mask position
             mask_ratio[1] += 1
@@ -363,28 +374,28 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
 
             inner_pbar.update(1)
             
-            input = (batch.detach().cpu() * std + mean) * 0.0001
-            input_mask = label_mask_batch.detach().cpu()
-            processed_mask = model.unpatchify(mask.unsqueeze(-1).repeat(1, 1, pred.shape[-1])).detach().cpu()
-            predicted = (model.unpatchify(pred).detach().cpu() * std + mean) * 0.0001
-            input_masked = input * processed_mask
-            predicted_masked = predicted * processed_mask
+            input = (batch.detach() * std + mean) * 0.0001
+            input_mask = label_mask_batch.detach()
+            predicted = (model.unpatchify(pred).detach() * std + mean) * 0.0001
+            input_masked = input * input_mask
+            predicted_masked = predicted * input_mask
             
             ssim_score = StructuralSimilarity(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
 
-            ssim[0] += ssim_score
+            ssim[0] += ssim_score.item()
             ssim[1] += 1
   
-            mse_score = mean_squared_error(predicted_masked, input_masked)
-            mse_score /= (torch.mean(mask).detach().cpu())
+            mse_score = mean_squared_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
+            mse_score /= (torch.mean(input_mask[:,:,1,:,:]))
             
-            mse[0] += mse_score
+            mse[0] += mse_score.item()
             mse[1] += 1
-            
-            if i % 5 == 0:
-                if vis_path is not None:
-                    os.makedirs(vis_path, exist_ok=True)
-                    visualize_tcc(vis_path, n_epoch, i, input, input_mask, processed_mask, predicted)
+
+            mae_score = mean_abs_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
+            mae_score /= (torch.mean(input_mask[:,:,1,:,:]))
+        
+            mae[0] += mae_score.item()
+            mae[1] += 1
 
         # dist.barrier()
 
@@ -393,10 +404,11 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
     epoch_mask_ratio = mask_ratio[0] / mask_ratio[1]
     epoch_ssim = ssim[0] / ssim[1]
     epoch_mse = mse[0] / mse[1]
+    epoch_mae = mae[0] / mae [1]
     
     inner_pbar.close()
-    print(f"Validation Loss: {val_loss:.4f}, Mask Ratio: \t{epoch_mask_ratio:.4f}, SSIM: {epoch_ssim:.4f}, MSE: {epoch_mse:.4f}")
-    return val_loss, epoch_mask_ratio, epoch_ssim, epoch_mse
+    print(f"Validation Loss: {val_loss:.4f}, Mask Ratio: \t{epoch_mask_ratio:.4f}, SSIM: {epoch_ssim:.4f}, MSE: {epoch_mse:.4f}, MAE: {epoch_mae:.4f}")
+    return val_loss, epoch_mask_ratio, epoch_ssim, epoch_mse, epoch_mae
 
 
 def fsdp_main(args):
@@ -441,7 +453,7 @@ def fsdp_main(args):
     epochs = args.num_epochs
 
     # logging related
-    job_id = f"{time.strftime('%Y-%m-%d_%H-%M-%S')}"
+    job_id = f"{training_length}-fair-bs16-{time.strftime('%Y-%m-%d_%H-%M-%S')}"
 
     ckpt_dir = os.path.join(args.base_checkpoint_dir, job_id)
     vis_dir = os.path.join(args.base_visualization_dir, job_id)
@@ -463,6 +475,7 @@ def fsdp_main(args):
     params_dict['job_finish_time'] = 'NA'
 
     os.makedirs(job_info_dir, exist_ok=True)
+    os.makedirs(csv_log_dir, exist_ok=True)
     with open(os.path.join(job_info_dir, f'{job_id}.yaml'), 'w') as f:
         yaml.safe_dump(params_dict, f, default_flow_style=None, sort_keys=False)
     
@@ -521,8 +534,10 @@ def fsdp_main(args):
     if rank == 0:
         print(f"--> Validation set masks = {val_dataset.n_cloudpaths}")
     
-    train_dataset.cloud_catalog.to_csv(os.path.join(job_info_dir, "train_cloud_catalog.csv"), index=False)
-    val_dataset.cloud_catalog.to_csv(os.path.join(job_info_dir, "val_cloud_catalog.csv"), index=False)
+    train_dataset.cloud_catalog.to_csv(os.path.join(csv_log_dir, "train_cloud_catalog.csv"), index=False)
+    val_dataset.cloud_catalog.to_csv(os.path.join(csv_log_dir, "val_cloud_catalog.csv"), index=False)
+    train_dataset.tif_catalog.to_csv(os.path.join(csv_log_dir, "train_tif_catalog.csv"), index=False)
+    val_dataset.tif_catalog.to_csv(os.path.join(csv_log_dir, "val_tif_catalog.csv"), index=False)
 
     train_sampler = torch.utils.data.RandomSampler(train_dataset, replacement=True)
     val_sampler = torch.utils.data.SequentialSampler(val_dataset)
@@ -552,6 +567,7 @@ def fsdp_main(args):
     scheduler = OneCycleLR(optimizer, max_lr=lr*10, steps_per_epoch=len(train_loader), epochs=epochs)
 
     best_val_loss = float("inf")
+    best_val_ssim = 0
 
     # --- main training loop
     if rank == 0:
@@ -588,27 +604,27 @@ def fsdp_main(args):
 
     # -- Start Training -----
     for epoch in range(1, epochs + 1):
-        # print('training ' + str(epoch) + ' rank ' + str(rank))
-        # if rank == 0:
-        #     print(f"\n--> Starting Epoch {epoch}")
+        print('training ' + str(epoch) + ' rank ' + str(rank))
+        if rank == 0:
+            print(f"\n--> Starting Epoch {epoch}")
 
-        #     t0 = time.time()
-        # train_loss, train_mask_ratio, train_ssim, train_mse = train(
-        #     model,
-        #     mask_ratio,
-        #     local_rank,
-        #     rank,
-        #     train_loader,
-        #   #  mask_train_loader_list,
-        #     optimizer,
-        #     epoch,
-        #     sampler=train_sampler,
-        #     profiler=torch_profiler,
-        #     scheduler=scheduler,
-        #     vis_path=vis_dir,
-        # )
+            t0 = time.time()
+        train_loss, train_mask_ratio, train_ssim, train_mse, train_mae = train(
+            model,
+            mask_ratio,
+            local_rank,
+            rank,
+            train_loader,
+          #  mask_train_loader_list,
+            optimizer,
+            epoch,
+            sampler=train_sampler,
+            profiler=torch_profiler,
+            scheduler=scheduler,
+            vis_path=vis_dir,
+        )
 
-        curr_val_loss, val_mask_ratio, val_ssim, val_mse = validation(model, mask_ratio, local_rank, rank, test_loader, epoch, vis_path=vis_dir)
+        curr_val_loss, val_mask_ratio, val_ssim, val_mse, val_mae = validation(model, mask_ratio, local_rank, rank, test_loader, epoch, vis_path=vis_dir)
 
         # Write logs in two formats: tensorboard and csv.
         if rank == 0:
@@ -617,7 +633,7 @@ def fsdp_main(args):
                 "train": train_loss,
                 "test":  curr_val_loss
             }, epoch)
-            log_writer.write(f"{epoch},{scheduler.get_last_lr()[0]},{train_loss},{train_mask_ratio},{train_ssim},{curr_val_loss},{train_mse},{val_mask_ratio},{val_ssim},{val_mse}\n")
+            log_writer.write(f"{epoch},{scheduler.get_last_lr()[0]},{train_loss},{train_mask_ratio},{train_ssim},{train_mse},{train_mae},{curr_val_loss},{val_mask_ratio},{val_ssim},{val_mse},{val_mae}\n")
             # flush on each write to avoid log loss due to unexpected exit
             tensorboard_writer.flush()
             log_writer.flush()
@@ -644,18 +660,23 @@ def fsdp_main(args):
                 torch.save(model.state_dict(), checkpoint_file)
                 print(f"--> saved {checkpoint_file} to COS")
 
-        if epoch <= 20 and curr_val_loss < best_val_loss:
-            print(f"--> saving model ...")
-            filename = "model_best_20epochs.pt"
-            checkpoint_file = os.path.join(ckpt_dir, filename)
-            os.makedirs(ckpt_dir, exist_ok=True)
-            torch.save(model.state_dict(), checkpoint_file)
-            print(f"--> saved {checkpoint_file} to COS")
+        if val_ssim > best_val_ssim:
+            if rank == 0:
+                print(f"--> saving model ...")
+                filename = "model_best_ssim.pt"
+                checkpoint_file = os.path.join(ckpt_dir, filename)
+                os.makedirs(ckpt_dir, exist_ok=True)
+                torch.save(model.state_dict(), checkpoint_file)
+                print(f"--> saved {checkpoint_file} to COS")
 
         # announce new val loss record:
         if rank == 0 and curr_val_loss < best_val_loss:
             best_val_loss = curr_val_loss
             print(f"-->>>> New Val Loss Record: {best_val_loss}")
+
+        if rank == 0 and val_ssim > best_val_ssim:
+            best_val_ssim = val_ssim
+            print(f"-->>>> New Val Loss Record: {best_val_ssim}")
 
     # init_end_event.record()
     if rank == 0:
