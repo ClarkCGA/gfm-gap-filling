@@ -284,8 +284,8 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             input_masked = input * input_mask
             predicted_masked = predicted * input_mask
 
-            if i % 80 == 0:
-                visualize_tcc(vis_path, i, input, input_mask, processed_mask, predicted)
+            # if i % 5 == 0:
+            #     visualize_tcc(vis_path, i, input, input_mask, processed_mask, predicted)
             
             ssim_score = StructuralSimilarity(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
 
@@ -361,10 +361,11 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
     epoch_mask_ratio = mask_ratio[0] / mask_ratio[1]
     epoch_ssim = ssim[0] / ssim[1]
     epoch_mse = mse[0] / mse[1]
-
+    epoch_mae = mae[0] / mae[1]
+    
     inner_pbar.close()
-    print(f"Validation Loss: {val_loss:.4f}, Mask Ratio: \t{epoch_mask_ratio:.4f}, SSIM: {epoch_ssim:.4f}, MSE: {epoch_mse:.4f}")
-    return val_loss, epoch_mask_ratio, epoch_ssim, epoch_mse, data_list
+    print(f"Validation Loss: {val_loss:.4f}, Mask Ratio: \t{epoch_mask_ratio:.4f}, SSIM: {epoch_ssim:.4f}, MSE: {epoch_mse:.4f}, MAE: {epoch_mae:.4f}")
+    return val_loss, epoch_mask_ratio, epoch_ssim, epoch_mse, epoch_mae, data_list
 
 
 def fsdp_main(args):
@@ -481,7 +482,7 @@ def fsdp_main(args):
     # -- Start Training -----
     for epoch in range(1, epochs + 1):
 
-        curr_val_loss, val_mask_ratio, val_ssim, val_mse, data_list = validation(model, mask_ratio, local_rank, rank, test_loader, epoch, vis_path=vis_dir)
+        curr_val_loss, val_mask_ratio, val_ssim, val_mse, val_mae, data_list = validation(model, mask_ratio, local_rank, rank, test_loader, epoch, vis_path=vis_dir)
         stats_df = pd.DataFrame(data_list)
         chip_stats_df = pd.concat([val_chip_dataframe.reset_index(drop=True), stats_df.reset_index(drop=True)], axis=1)
         chip_stats_df.to_csv(os.path.join(csv_log_dir, "chip_stats.csv"), index=False)
