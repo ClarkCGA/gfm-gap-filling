@@ -37,14 +37,13 @@ from torch.utils.data import Dataset
 
 class CombinedDataset(Dataset):
     def __init__(self, data_path, split="train", num_frames=3, img_size=224, bands=["CDL"], num_hls_bands = 6, cloud_range = [0.01,1.0],
-                 normalize=True, training_length=8000,
-                 # small trick: as all original values are integers, we make mean values as non-integer
-                 # so normalized values have no 0, so that we can mark nodata as 0 because it is a good practice
-                 # to fill nodata as mean/median.
+                 normalize=True, training_length=6321,
                  mean=[495.7316,  814.1386,  924.5740, 2962.5623, 2640.8833, 1740.3031], std=[286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625], indices=None):
+        
         self.root_dir = pathlib.Path(data_path)
         self.image_dir = self.root_dir.joinpath("chips_filtered/")
         self.cloud_dir = self.root_dir.joinpath("cloud_mask/")
+
         self.split = split
         self.num_frames = num_frames
         self.mask_position = [2]
@@ -52,20 +51,35 @@ class CombinedDataset(Dataset):
         self.bands = bands
         self.num_hls_bands = num_hls_bands
         self.training_length = training_length
+
         if self.split == "train":
             self.cloud_range = cloud_range
         if self.split == "validate":
             self.cloud_range = [0.01,1.0]
+
         self.normalize = normalize
         self.tif_paths, self.tif_catalog = self._get_tif_paths()
         self.cloud_paths, self.cloud_catalog = self._get_cloud_paths()
-
         self.n_cloudpaths = len(self.cloud_paths)
         self.mean = np.array(mean * 3)[:, np.newaxis, np.newaxis]  # corresponding mean per band for normalization purpose
         self.std = np.array(std * 3)[:, np.newaxis, np.newaxis]  # corresponding std per band for normalization purpose
 
-    # Create list of all merged image chips
     def _get_tif_paths(self):
+        """
+    Retrieve paths to valid image data files and their corresponding metadata catalog.
+
+    This method reads a CSV file containing chip metadata and filters it based on the split, bad pixel percentage,
+    and NA count criteria. It then creates a subset of the catalog and extracts valid chip IDs.
+    The method constructs paths to the valid image data files and sorts the catalog by chip ID.
+
+    Returns:
+        tuple: A tuple containing two elements:
+            - truelist (list): A list of pathlib.Path objects representing paths to valid image data files.
+            - sorted_catalog (pd.DataFrame): A pandas DataFrame containing sorted metadata of valid chips.
+
+    Note:
+        The CSV file should be named "final_chip_tracker.csv" and located within the root directory.
+    """
         csv = pd.read_csv(self.root_dir.joinpath("final_chip_tracker.csv"))
         catalog = csv.loc[(csv["usage"] == self.split) & (csv["bad_pct_max"] < 5) & (csv["na_count"] == 0)]
         if self.split == "train":
@@ -79,8 +93,22 @@ class CombinedDataset(Dataset):
         sorted_catalog = catalog_subset.sort_values(by="chip_id", ascending=True)
         return truelist, sorted_catalog
 
-    # Create list of all paths to clouds
     def _get_cloud_paths(self):
+        """
+    Retrieve paths to valid cloud mask data files and their corresponding metadata catalog.
+
+    This method reads a CSV file containing cloud mask metadata and filters it based on the split and
+    cloud percentage range. It then creates a catalog subset and extracts
+    valid cloud mask filenames. The method constructs paths to the valid cloud mask data files.
+
+    Returns:
+        tuple: A tuple containing two elements:
+            - truelist (list): A list of pathlib.Path objects representing paths to valid cloud mask data files.
+            - catalog (pd.DataFrame): A pandas DataFrame containing metadata of valid cloud mask files.
+
+    Note:
+        The CSV file should be named "fmask_tracker_balanced.csv" and located within the root directory.
+    """
         csv = pd.read_csv(self.root_dir.joinpath("fmask_tracker_balanced.csv"))
         catalog = csv.loc[(csv["usage"] == self.split) & (csv["cloud_pct"] <= self.cloud_range[1]) & (csv["cloud_pct"] >= self.cloud_range[0])]
         itemlist = sorted(catalog["fmask_name"].tolist())
@@ -93,6 +121,24 @@ class CombinedDataset(Dataset):
         return len(self.tif_paths)
 
     def __getitem__(self, index):
+        """
+    Retrieve a combined data sample containing ground truth and cloud mask information.
+
+    This method reads and processes image and cloud mask data for a given index. It loads the merged
+    tif file as ground truth and optionally normalizes it. It then creates an empty cloud mask array
+    and populates it with cloud scenes based on the mask position and dataset split. The ground truth
+    and cloud mask data are combined along new dimensions to create a tensor with the required structure.
+
+    Args:
+        index (int): Index of the data sample to retrieve.
+
+    Returns:
+        np.ndarray: A numpy array containing the combined data with dimensions (mask-or-image, bands, time steps, height, width).
+
+    Note:
+        The method assumes that cloud mask data paths and ground truth data paths have been pre-loaded using the `_get_cloud_paths` and `_get_tif_paths` methods.
+        Additionally, the cloud mask data is read randomly from available paths during training and cyclically during validation.
+    """
         def read_tif_as_np_array(path):
             with rasterio.open(path) as src:
                     return src.read()
@@ -112,19 +158,20 @@ class CombinedDataset(Dataset):
         # Initialize empty cloud mask with same dimensions as ground truth
         cloudbrick = np.zeros_like(groundtruth)
 
-        # For every specified mask position, read in a random cloud scene and add to the block of cloud masks
+        # For every specified mask position in training, read in a random cloud scene and add to the block of cloud masks
         if self.split == "train":
             for p in self.mask_position:
                 cloudscene = read_tif_as_np_array(self.cloud_paths[np.random.randint(0,self.n_cloudpaths-1)])
                 cloudscene = np.expand_dims(cloudscene, 0)
-                cloudbrick[p-1,:,:,:] = cloudscene # Check if this works, the code should assign cloud scene to ALL these values in the 4 channels indexed.
+                cloudbrick[p-1,:,:,:] = cloudscene
                 del cloudscene
 
         if self.split == "validate":
             for p in self.mask_position:
-                cloudscene = read_tif_as_np_array(self.cloud_paths[index % self.n_cloudpaths])
+                # When validating, we remove randomness by looping through the index of the cloud path list.
+                cloudscene = read_tif_as_np_array(self.cloud_paths[index % self.n_cloudpaths]) 
                 cloudscene = np.expand_dims(cloudscene, 0)
-                cloudbrick[p-1,:,:,:] = cloudscene # Check if this works, the code should assign cloud scene to ALL these values in the 4 channels indexed.
+                cloudbrick[p-1,:,:,:] = cloudscene 
                 del cloudscene
 
         cloudbrick = np.expand_dims(cloudbrick, 0) # Adds a dimension at index 0
@@ -135,21 +182,36 @@ class CombinedDataset(Dataset):
         # A tensor with dimensions (mask-or-image, bands, time steps, height, width)
         return combined_data
 
-def visualize_tcc(vis_path, n_epoch, idx, input, input_mask, processed_mask, predicted):
+def visualize_tcc(vis_path, n_epoch, idx, input, input_mask, predicted):
+    """
+    Generate and save visualizations of inputs and outputs to the model as true color composites.
 
+    This function creates visualizations of input, predicted, and ground truth images at all time steps.
+    The resulting images are saved to the specified visualization path.
+
+    Args:
+        vis_path (str): Path to the directory where visualization images will be saved.
+        n_epoch (int): Current epoch number.
+        idx (int): Index of the sample in the dataset.
+        input (torch.Tensor): Input image sequence tensor (shape: [batch_size, bands, time steps, height, width]).
+        input_mask (torch.Tensor): Binary mask for input images (shape: [batch_size, bands, time steps, height, width]).
+        predicted (torch.Tensor): Predicted cloud-corrected image sequence tensor (shape: [batch_size, bands, time steps, height, width]).
+    """
     n_timesteps = input.size()[2]
+
     input_list = []
     reconstruction_list = []
     groundtruth_list = []
-    "torch.Size([1, 6, 3, 224, 224])"
+
     for t in range(1, n_timesteps+1):
         input_img = input[0,0:3,t-1,:,:].clone().flip(0) * 3
         input_mask_img = input_mask[0,0:3,t-1,:,:].clone()
         input_masked = torch.where(input_mask_img == 1, input_mask_img, input_img)
         input_masked = torch.nn.functional.pad(input_masked, (2,2,2,2), value=0)
         input_list.append(input_masked)
+
     for t in range(1, n_timesteps+1):
-        processed_mask_img = processed_mask[0,0:3,t-1,:,:].clone()
+        processed_mask_img = input_mask[0,0:3,t-1,:,:].clone()
         predicted_img = predicted[0,0:3,t-1,:,:].clone().flip(0) * 3
         input_img = input[0,0:3,t-1,:,:].clone().flip(0) * 3
         predicted_unmasked = predicted_img * processed_mask_img
@@ -157,14 +219,18 @@ def visualize_tcc(vis_path, n_epoch, idx, input, input_mask, processed_mask, pre
         reconstructed_img = predicted_unmasked + input_masked
         reconstructed_img = torch.nn.functional.pad(reconstructed_img, (2,2,2,2), value=0)
         reconstruction_list.append(reconstructed_img)
+
     for t in range(1, n_timesteps+1):
         input_img = input[0,0:3,t-1,:,:].clone().flip(0) * 3
         input_img = torch.nn.functional.pad(input_img, (2,2,2,2), value=0)
         groundtruth_list.append(input_img)
+
     input_list = torch.cat(input_list, dim=1)
     reconstruction_list = torch.cat(reconstruction_list, dim=1)
     groundtruth_list = torch.cat(groundtruth_list, dim=1)
+
     full_vis = torch.cat([input_list]+[reconstruction_list]+[groundtruth_list], dim=2)
+
     torchvision.utils.save_image(
         full_vis, os.path.join(vis_path, "epoch{:04}_idx{:04}_gen.jpg".format(n_epoch, idx)),
     )
