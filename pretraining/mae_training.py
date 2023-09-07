@@ -36,31 +36,46 @@ from torch.utils.tensorboard import SummaryWriter
 from torch.utils.data import Dataset
 
 class CombinedDataset(Dataset):
-    def __init__(self, data_path, split="train", num_frames=3, img_size=224, bands=["CDL"], num_hls_bands = 6, cloud_range = [0.01,1.0],
-                 normalize=True, training_length=6321,
-                 mean=[495.7316,  814.1386,  924.5740, 2962.5623, 2640.8833, 1740.3031], std=[286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625], indices=None):
+    def __init__(self, data_path, 
+                 split="train", 
+                 num_frames=3, 
+                 img_size=224, 
+                 bands=["CDL"], 
+                 num_hls_bands = 6, 
+                 cloud_range = [0.01,1.0],
+                 normalize=True, 
+                 training_length=6321,
+                 mean=[495.7316,  814.1386,  924.5740, 2962.5623, 2640.8833, 1740.3031], 
+                 std=[286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625], 
+                 mask_position = [2]):
         
+        # get all directories needed for reading in chips
         self.root_dir = pathlib.Path(data_path)
         self.image_dir = self.root_dir.joinpath("chips_filtered/")
         self.cloud_dir = self.root_dir.joinpath("cloud_mask/")
 
+        # set parameters
         self.split = split
         self.num_frames = num_frames
-        self.mask_position = [2]
+        self.mask_position = mask_position
         self.img_size = img_size
         self.bands = bands
         self.num_hls_bands = num_hls_bands
         self.training_length = training_length
+        self.normalize = normalize
 
+        # ensure that validation cloud range is always the same across experiments
         if self.split == "train":
             self.cloud_range = cloud_range
         if self.split == "validate":
             self.cloud_range = [0.01,1.0]
 
-        self.normalize = normalize
+        # get image tif paths, a catalog of used tifs, cloud paths, and a catalog of used cloud masks using appropriate methods
         self.tif_paths, self.tif_catalog = self._get_tif_paths()
         self.cloud_paths, self.cloud_catalog = self._get_cloud_paths()
+
         self.n_cloudpaths = len(self.cloud_paths)
+
         self.mean = np.array(mean * 3)[:, np.newaxis, np.newaxis]  # corresponding mean per band for normalization purpose
         self.std = np.array(std * 3)[:, np.newaxis, np.newaxis]  # corresponding std per band for normalization purpose
 
@@ -80,17 +95,24 @@ class CombinedDataset(Dataset):
     Note:
         The CSV file should be named "final_chip_tracker.csv" and located within the root directory.
     """
-        csv = pd.read_csv(self.root_dir.joinpath("final_chip_tracker.csv"))
-        catalog = csv.loc[(csv["usage"] == self.split) & (csv["bad_pct_max"] < 5) & (csv["na_count"] == 0)]
+        
+        csv = pd.read_csv(self.root_dir.joinpath("final_chip_tracker.csv")) # access chip tracker
+        
+        # filter csv by split, bad_pct_max and na_count
+        catalog = csv.loc[(csv["usage"] == self.split) & (csv["bad_pct_max"] < 5) & (csv["na_count"] == 0)] 
+        
+        # ensure that validation set is always the same across experiments
         if self.split == "train":
-            catalog_subset = catalog.sample(n=self.training_length)
+            catalog_subset = catalog.sample(n=self.training_length) # get random sample of the catalog defined by the training length
         else:
             catalog_subset = catalog
+        
         itemlist = sorted(catalog_subset["chip_id"].tolist())
-        pathlist = [self.image_dir.joinpath(f"{item}_merged.tif") for item in itemlist]
-        chipslist = list(self.image_dir.glob("*.tif"))
-        truelist = sorted(list(set(pathlist) & set(chipslist)))
-        sorted_catalog = catalog_subset.sort_values(by="chip_id", ascending=True)
+        pathlist = [self.image_dir.joinpath(f"{item}_merged.tif") for item in itemlist] # get paths for each item of filtered catalog
+        chipslist = list(self.image_dir.glob("*.tif")) # get paths for each item in the image directory
+        truelist = sorted(list(set(pathlist) & set(chipslist))) # get only paths from the catalog which represent valid paths in the directory
+        sorted_catalog = catalog_subset.sort_values(by="chip_id", ascending=True) # ensure that the catalog is sorted identically to the path list
+
         return truelist, sorted_catalog
 
     def _get_cloud_paths(self):
@@ -109,12 +131,16 @@ class CombinedDataset(Dataset):
     Note:
         The CSV file should be named "fmask_tracker_balanced.csv" and located within the root directory.
     """
-        csv = pd.read_csv(self.root_dir.joinpath("fmask_tracker_balanced.csv"))
+        csv = pd.read_csv(self.root_dir.joinpath("fmask_tracker_balanced.csv")) # access cloud tracker
+
+        # filter csv by usage and cloud cover range defined when initializing the dataset
         catalog = csv.loc[(csv["usage"] == self.split) & (csv["cloud_pct"] <= self.cloud_range[1]) & (csv["cloud_pct"] >= self.cloud_range[0])]
-        itemlist = sorted(catalog["fmask_name"].tolist())
-        chipslist = list(self.cloud_dir.glob("*.tif"))
-        pathlist = [self.cloud_dir.joinpath(f"{item}") for item in itemlist]
-        truelist = sorted(list(set(pathlist) & set(chipslist)))
+        
+        itemlist = sorted(catalog["fmask_name"].tolist()) 
+        chipslist = list(self.cloud_dir.glob("*.tif")) # get paths for each item in the cloud directory
+        pathlist = [self.cloud_dir.joinpath(f"{item}") for item in itemlist] # get paths for each item of filtered catalog
+        truelist = sorted(list(set(pathlist) & set(chipslist))) # get only paths from the catalog which represent valid paths in the directory
+
         return truelist, catalog
     
     def __len__(self):
@@ -136,15 +162,15 @@ class CombinedDataset(Dataset):
         np.ndarray: A numpy array containing the combined data with dimensions (mask-or-image, bands, time steps, height, width).
 
     Note:
-        The method assumes that cloud mask data paths and ground truth data paths have been pre-loaded using the `_get_cloud_paths` and `_get_tif_paths` methods.
+        The method assumes that cloud mask data paths and ground truth data paths have been pre-loaded using the `get_cloud_paths` and `get_tif_paths` methods.
         Additionally, the cloud mask data is read randomly from available paths during training and cyclically during validation.
     """
         def read_tif_as_np_array(path):
             with rasterio.open(path) as src:
                     return src.read()
 
-        # Read in merged tif as ground truth
-        groundtruth = read_tif_as_np_array(self.tif_paths[index]) # Need to normalize here
+        # read in merged tif as ground truth
+        groundtruth = read_tif_as_np_array(self.tif_paths[index]) # need to normalize here
 
         if self.normalize:
             groundtruth = np.where(groundtruth == -9999, 0.0001,
@@ -152,13 +178,13 @@ class CombinedDataset(Dataset):
         else:
             groundtruth = groundtruth * 0.0001  # if not normalize, just rescale
         
-        # Transpose to bands, time steps, height, width
+        # transpose to bands, time steps, height, width
         groundtruth = groundtruth.reshape(self.num_frames, self.bands, self.img_size, self.img_size)
 
-        # Initialize empty cloud mask with same dimensions as ground truth
+        # initialize empty cloud mask with same dimensions as ground truth
         cloudbrick = np.zeros_like(groundtruth)
 
-        # For every specified mask position in training, read in a random cloud scene and add to the block of cloud masks
+        # for every specified mask position in training, read in a random cloud scene and add to the block of cloud masks
         if self.split == "train":
             for p in self.mask_position:
                 cloudscene = read_tif_as_np_array(self.cloud_paths[np.random.randint(0,self.n_cloudpaths-1)])
@@ -168,24 +194,25 @@ class CombinedDataset(Dataset):
 
         if self.split == "validate":
             for p in self.mask_position:
-                # When validating, we remove randomness by looping through the index of the cloud path list.
+                # when validating, we remove randomness by looping through the index of the cloud path list
                 cloudscene = read_tif_as_np_array(self.cloud_paths[index % self.n_cloudpaths]) 
                 cloudscene = np.expand_dims(cloudscene, 0)
                 cloudbrick[p-1,:,:,:] = cloudscene 
                 del cloudscene
 
-        cloudbrick = np.expand_dims(cloudbrick, 0) # Adds a dimension at index 0
+        cloudbrick = np.expand_dims(cloudbrick, 0) # adds a dimension at index 0
         groundtruth = np.expand_dims(groundtruth, 0) 
-        # Concatenate the tensors along the new dimension
+        # concatenate the tensors along the new dimension
         combined_data = np.concatenate((groundtruth, cloudbrick), axis=0).astype(np.float32).transpose(0,2,1,3,4)
 
-        # A tensor with dimensions (mask-or-image, bands, time steps, height, width)
+        # return tensor with dimensions (mask-or-image, bands, time steps, height, width)
         return combined_data
+
 
 def visualize_tcc(vis_path, n_epoch, idx, input, input_mask, predicted):
     """
     Generate and save visualizations of inputs and outputs to the model as true color composites.
-
+    This function will only create visualizations for the first tensor in the batch.
     This function creates visualizations of input, predicted, and ground truth images at all time steps.
     The resulting images are saved to the specified visualization path.
 
@@ -193,44 +220,50 @@ def visualize_tcc(vis_path, n_epoch, idx, input, input_mask, predicted):
         vis_path (str): Path to the directory where visualization images will be saved.
         n_epoch (int): Current epoch number.
         idx (int): Index of the sample in the dataset.
-        input (torch.Tensor): Input image sequence tensor (shape: [batch_size, bands, time steps, height, width]).
-        input_mask (torch.Tensor): Binary mask for input images (shape: [batch_size, bands, time steps, height, width]).
-        predicted (torch.Tensor): Predicted cloud-corrected image sequence tensor (shape: [batch_size, bands, time steps, height, width]).
+        input (torch.Tensor): Input image tensor (shape: [batch_size, bands, time steps, height, width]).
+        input_mask (torch.Tensor): Binary mask for input images: 1 is masked while 0 is not masked (shape: [batch_size, bands, time steps, height, width]).
+        predicted (torch.Tensor): Predicted image tensor (shape: [batch_size, bands, time steps, height, width]).
     """
-    n_timesteps = input.size()[2]
+    n_timesteps = input.size()[2] # get number of time steps from input
 
+    # initialize empty lists for each category of visualization
     input_list = []
     reconstruction_list = []
     groundtruth_list = []
 
+    # visualize input images and masks for each time step
     for t in range(1, n_timesteps+1):
-        input_img = input[0,0:3,t-1,:,:].clone().flip(0) * 3
-        input_mask_img = input_mask[0,0:3,t-1,:,:].clone()
-        input_masked = torch.where(input_mask_img == 1, input_mask_img, input_img)
-        input_masked = torch.nn.functional.pad(input_masked, (2,2,2,2), value=0)
-        input_list.append(input_masked)
+        input_img = input[0,0:3,t-1,:,:].clone().flip(0) * 3 # get input scenes as [B,H,W], flip bands to RGB and scale by 3 for brightness
+        input_mask_img = input_mask[0,0:3,t-1,:,:].clone() # get input mask
+        input_masked = torch.where(input_mask_img == 1, input_mask_img, input_img) # make masked areas white by setting all bands to 1
+        input_masked = torch.nn.functional.pad(input_masked, (2,2,2,2), value=0) # add 2 pixel wide black border to image
+        input_list.append(input_masked) # append to list of input masks, in format [Bands, Height, Width] with B in order R, G, B
+        
+    # visualize generated model reconstructions for each time step
+    for t in range(1, n_timesteps+1):
+        input_mask_img = input_mask[0,0:3,t-1,:,:].clone() # get input mask as [B,H,W]
+        predicted_img = predicted[0,0:3,t-1,:,:].clone().flip(0) * 3 # get prediceted scenes as [B,H,W], flip bands to RGB and scale by 3 for brightness
+        input_img = input[0,0:3,t-1,:,:].clone().flip(0) * 3 # get input scenes, flip to RGB and scale by 3 for brightness
+        predicted_unmasked = predicted_img * input_mask_img # get an image of predicted values at masked pixels (mask=1)
+        input_masked = input_img * (1-input_mask_img) # get an image of input values at non-masked pixels (mask=0)
+        reconstructed_img = predicted_unmasked + input_masked # create composite of input and predicted values
+        reconstructed_img = torch.nn.functional.pad(reconstructed_img, (2,2,2,2), value=0) # add 2 pixel wide black border to image
+        reconstruction_list.append(reconstructed_img) # append to list of reconstructed images in format [Bands, Height, Width] with B in order R, G, B
 
     for t in range(1, n_timesteps+1):
-        processed_mask_img = input_mask[0,0:3,t-1,:,:].clone()
-        predicted_img = predicted[0,0:3,t-1,:,:].clone().flip(0) * 3
-        input_img = input[0,0:3,t-1,:,:].clone().flip(0) * 3
-        predicted_unmasked = predicted_img * processed_mask_img
-        input_masked = input_img * (1-processed_mask_img)
-        reconstructed_img = predicted_unmasked + input_masked
-        reconstructed_img = torch.nn.functional.pad(reconstructed_img, (2,2,2,2), value=0)
-        reconstruction_list.append(reconstructed_img)
+        input_img = input[0,0:3,t-1,:,:].clone().flip(0) * 3 # get input scenes, flip to RGB and scale by 3 for brightness
+        input_img = torch.nn.functional.pad(input_img, (2,2,2,2), value=0) # add 2 pixel wide black border to image
+        groundtruth_list.append(input_img) # append to list of ground truth images in format [Bands, Height, Width] with B in order R, G, B
 
-    for t in range(1, n_timesteps+1):
-        input_img = input[0,0:3,t-1,:,:].clone().flip(0) * 3
-        input_img = torch.nn.functional.pad(input_img, (2,2,2,2), value=0)
-        groundtruth_list.append(input_img)
-
+    # concatenate all images in the lists vertically
     input_list = torch.cat(input_list, dim=1)
     reconstruction_list = torch.cat(reconstruction_list, dim=1)
     groundtruth_list = torch.cat(groundtruth_list, dim=1)
 
+    # concatenate all lists horizontally, creating a single tensor with all visualizations
     full_vis = torch.cat([input_list]+[reconstruction_list]+[groundtruth_list], dim=2)
 
+    # save full visualization tensor to visualization directory, formatted as epoch{n_epoch}_idx{idx}_gen.jpg
     torchvision.utils.save_image(
         full_vis, os.path.join(vis_path, "epoch{:04}_idx{:04}_gen.jpg".format(n_epoch, idx)),
     )
@@ -314,7 +347,6 @@ def train(
         local_rank,
         rank,
         train_loader,
-     #   mask_train_loader_list,
         optimizer,
         epoch,
         sampler=None,
@@ -323,67 +355,86 @@ def train(
         vis_path=None,
 ):
     model.train()
+
+    # initialize metrics and send to local rank
     ddp_loss = torch.zeros(2).to(local_rank)
     mask_ratio = torch.zeros(2).to(local_rank)
     ssim = torch.zeros(2).to(local_rank)
     mse = torch.zeros(2).to(local_rank)
     mae = torch.zeros(2).to(local_rank)
+    
+    # mean and std for normalization purposes
     mean = torch.tensor([495.7316,  814.1386,  924.5740, 2962.5623, 2640.8833, 1740.3031])[None,:,None,None,None].to(local_rank)
     std = torch.tensor([286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625])[None,:,None,None,None].to(local_rank)
+
+    # initialize torchmetrics classes
     StructuralSimilarity = StructuralSimilarityIndexMeasure(data_range=1.0).to(local_rank)
     mean_squared_error = MeanSquaredError().to(local_rank)
     mean_abs_error = MeanAbsoluteError().to(local_rank)
-    # if sampler:
-    #     sampler.set_epoch(epoch)
+    
     inner_pbar = tqdm.tqdm(
         range(len(train_loader)), colour="blue", desc="Training Epoch", leave=True
     )
-    # start = time.time()
+
     for i, batch in enumerate(train_loader):
 
+        # get mask batches from dataset
         label_mask_batch = batch[:,1,:,:,:,:].to(local_rank)
 
+        # get input image batches from dataset
         batch = batch[:,0,:,:,:,:].to(local_rank)
 
-
-        
         optimizer.zero_grad()
 
-       # label_mask_batch = mask_train_loader_list[i]
-
+        # run model on mask and input batches
         loss, pred, mask = model(batch, label_mask_batch, mask_ratio)
 
         loss.backward()
         torch.nn.utils.clip_grad_norm_(model.parameters(), 1.)
         optimizer.step()
 
-        mask_ratio[0] += torch.mean(mask) * 3
+        # add mean of mask to running total
+        mask_ratio[0] += torch.mean(mask)
         mask_ratio[1] += 1
 
+        # add loss to running total - this is based on z-normalized data
         ddp_loss[0] += loss.item()
         ddp_loss[1] += 1
 
+        # un-normalize the z-normalized input and predicted batch, then re-normalize by dividing by a scaling factor of 0.0001
+        # this is to make metrics comparable with metrics from the CGAN baseline, which using scaling factor normalization
         input = (batch.detach() * std + mean) * 0.0001
-        input_mask = label_mask_batch.detach()
+        input_mask = label_mask_batch.detach() 
         predicted = (model.unpatchify(pred).detach() * std + mean) * 0.0001
-        input_masked = input * input_mask
-        predicted_masked = predicted * input_mask
+
+        input_masked = input * input_mask # get only input pixels in masked areas
+        predicted_masked = predicted * input_mask # get only predicted pixels in masked areas
         
-        
+        # get ssim between the masked ground truth and the masked predicted image, only in the center time step
+        # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
         ssim_score = StructuralSimilarity(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
 
+        # add ssim to running total
         ssim[0] += ssim_score.item()
         ssim[1] += 1
 
+        # get mean squared error between the masked ground truth and the masked predicted image, only in the center time step
+        # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
+        # then, divide by the mean of the input mask in the center time step to normalize the mse to reflect that we are only looking at masked pixels
         mse_score = mean_squared_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
         mse_score /= (torch.mean(input_mask[:,:,1,:,:]))
         
+        # add mse to running total
         mse[0] += mse_score.item()
         mse[1] += 1
 
+        # get mean absolute error between the masked ground truth and the masked predicted image, only in the center time step
+        # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
+        # then, divide by the mean of the input mask in the center time step to normalize the mse to reflect that we are only looking at masked pixels
         mae_score = mean_abs_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
         mae_score /= (torch.mean(input_mask[:,:,1,:,:]))
         
+        # add mae to running total
         mae[0] += mae_score.item()
         mae[1] += 1
 
@@ -393,79 +444,104 @@ def train(
    
         scheduler.step()
 
-
-    # consolidate final loss number - do not use .reduce here, requires global synch
-    # dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
+    # divide all running metrics to get overall metrics
     train_loss = ddp_loss[0] / ddp_loss[1]
     epoch_mask_ratio = mask_ratio[0] / mask_ratio[1]
     epoch_ssim = ssim[0] / ssim[1]
     epoch_mse = mse[0] / mse[1]
     epoch_mae = mae[0] / mae [1]
+
     inner_pbar.close()
 
+    # print and return metrics
     print(f"Train Epoch: \t{epoch}, Loss: \t{train_loss:.4f}, Mask Ratio: \t{epoch_mask_ratio:.4f}, SSIM: {epoch_ssim:.4f}, MSE: {epoch_mse:.4f}, MAE: {epoch_mae:.4f}")
     return train_loss, epoch_mask_ratio, epoch_ssim, epoch_mse, epoch_mae
 
 
 def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_path):
+    
     model.eval()
+    
+    # initialize metrics and send to local rank
     ddp_loss = torch.zeros(2).to(local_rank)
     mask_ratio = torch.zeros(2).to(local_rank)
     ssim = torch.zeros(2).to(local_rank)
     mse = torch.zeros(2).to(local_rank)
     mae = torch.zeros(2).to(local_rank)
+
+    # mean and std for normalization purposes
     mean = torch.tensor([495.7316,  814.1386,  924.5740, 2962.5623, 2640.8833, 1740.3031])[None,:,None,None,None].to(local_rank)
     std = torch.tensor([286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625])[None,:,None,None,None].to(local_rank)
+
     inner_pbar = tqdm.tqdm(
         range(len(test_loader)), colour="green", desc="Validation Epoch", leave=True
     )
-    
+
+    # initialize torchmetrics classes
     StructuralSimilarity = StructuralSimilarityIndexMeasure(data_range=1.0).to(local_rank)
     mean_squared_error = MeanSquaredError().to(local_rank)
     mean_abs_error = MeanAbsoluteError().to(local_rank)
 
     with torch.no_grad():
         for i, batch in enumerate(test_loader):
+            
+            # get mask batches from dataset
             label_mask_batch = batch[:,1,:,:,:,:].to(local_rank)
 
+            # get input image batches from dataset
             batch = batch[:,0,:,:,:,:].to(local_rank)
-          #  label_mask_batch = mask_val_loader_list[i]
-            loss, pred, mask = model(batch, label_mask_batch, mask_ratio)
 
-            mask_ratio[0] += torch.mean(mask) * 3 # Adjust to only one mask position
-            mask_ratio[1] += 1
+            # run model on mask and input batches
+            loss, pred, mask = model(batch, label_mask_batch, mask_ratio)
             
-            ddp_loss[0] += loss.item()  # sum up batch loss
+            # add mean of mask to running total, adjust to only one mask position
+            mask_ratio[0] += torch.mean(mask) * 3
+            mask_ratio[1] += 1
+
+            # add loss to running total - this is based on z-normalized data
+            ddp_loss[0] += loss.item()
             ddp_loss[1] += 1
 
-            inner_pbar.update(1)
-            
+            # un-normalize the z-normalized input and predicted batch, then re-normalize by dividing by a scaling factor of 0.0001
+            # this is to make metrics comparable with metrics from the CGAN baseline, which using scaling factor normalization
             input = (batch.detach() * std + mean) * 0.0001
-            input_mask = label_mask_batch.detach()
+            input_mask = label_mask_batch.detach() 
             predicted = (model.unpatchify(pred).detach() * std + mean) * 0.0001
-            input_masked = input * input_mask
-            predicted_masked = predicted * input_mask
+
+            input_masked = input * input_mask # get only input pixels in masked areas
+            predicted_masked = predicted * input_mask # get only predicted pixels in masked areas
             
+            # get ssim between the masked ground truth and the masked predicted image, only in the center time step
+            # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
             ssim_score = StructuralSimilarity(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
 
+            # Add ssim to running total
             ssim[0] += ssim_score.item()
             ssim[1] += 1
-  
+
+            # get mean squared error between the masked ground truth and the masked predicted image, only in the center time step
+            # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
+            # then, divide by the mean of the input mask in the center time step to normalize the mse to reflect that we are only looking at masked pixels
             mse_score = mean_squared_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
             mse_score /= (torch.mean(input_mask[:,:,1,:,:]))
             
+            # add mse to running total
             mse[0] += mse_score.item()
             mse[1] += 1
 
+            # get mean absolute error between the masked ground truth and the masked predicted image, only in the center time step
+            # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
+            # then, divide by the mean of the input mask in the center time step to normalize the mse to reflect that we are only looking at masked pixels
             mae_score = mean_abs_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
             mae_score /= (torch.mean(input_mask[:,:,1,:,:]))
-        
+            
+            # add mae to running total
             mae[0] += mae_score.item()
             mae[1] += 1
+            
+            inner_pbar.update(1)
 
-        # dist.barrier()
-
-    # dist.all_reduce(ddp_loss, op=dist.ReduceOp.SUM)
+    # divide all running metrics to get overall metrics
     val_loss = ddp_loss[0] / ddp_loss[1]
     epoch_mask_ratio = mask_ratio[0] / mask_ratio[1]
     epoch_ssim = ssim[0] / ssim[1]
@@ -473,19 +549,21 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
     epoch_mae = mae[0] / mae [1]
     
     inner_pbar.close()
+    
+    # print and return metrics
     print(f"Validation Loss: {val_loss:.4f}, Mask Ratio: \t{epoch_mask_ratio:.4f}, SSIM: {epoch_ssim:.4f}, MSE: {epoch_mse:.4f}, MAE: {epoch_mae:.4f}")
     return val_loss, epoch_mask_ratio, epoch_ssim, epoch_mse, epoch_mae
 
 
 def fsdp_main(args):
     """main process, run within each individual GPU process"""
-    # TODO: can we get the time the job was submitted?
+
     start_time = f"{time.strftime('%Y-%m-%d %H:%M:%S')}"
 
     # debug nan gradient
     torch.autograd.set_detect_anomaly(True)
 
-    # torchrun specific
+    # these are configured to run the code with python rather than torchrun in order to run parallel experiments
     local_rank = args.local_rank
     rank = 0
     world_size = 1
@@ -501,7 +579,6 @@ def fsdp_main(args):
     num_hls_bands = len(bands)
     cloud_range = args.cloud_range
     training_length = args.training_length
-   # random_cropping = args.random_cropping
     num_workers = args.data_loader_num_workers
 
     # model related
@@ -530,7 +607,7 @@ def fsdp_main(args):
     # save job info in a yaml file
     params_dict = dict(vars(args))
 
-        # Add more info
+    # Add more info
     params_dict['job_id'] = job_id
     params_dict['checkpoint_dir'] = ckpt_dir
     params_dict['visualization_dir'] = vis_dir
@@ -545,7 +622,6 @@ def fsdp_main(args):
     with open(os.path.join(job_info_dir, f'{job_id}.yaml'), 'w') as f:
         yaml.safe_dump(params_dict, f, default_flow_style=None, sort_keys=False)
     
-
     # set seed in a way that:
     # 1. ensure reproducibility
     # 2. make sure each gpu has different seed to make sure different
@@ -560,7 +636,7 @@ def fsdp_main(args):
     # os.environ["NCCL_ASYNC_ERROR_HANDLING"] = str(1)
     # os.environ["TORCH_DISTRIBUTED_DEBUG"] = "DETAIL"
 
-    # create model
+    # create model - use if not loading from a checkpoint
     # model = MaskedAutoencoderViT(img_size=img_size, patch_size=patch_size,
     #              num_frames=num_frames, tubelet_size=tubelet_size,
     #              in_chans=6, embed_dim=embed_dim, depth=num_layers, num_heads=num_heads,
@@ -576,6 +652,7 @@ def fsdp_main(args):
         print(msg)
         return model
 
+    # load pretrained weights along with the version of the model that matches them
     model = prepare_model(checkpoint, 'mae_vit_base_patch16')
     print('Model loaded.')
 
@@ -583,35 +660,34 @@ def fsdp_main(args):
         total_params = sum(p.numel() for p in model.parameters() if p.requires_grad)
         print(f"\n--> model has {total_params / 1e6} Million params.\n")
 
-    # ____________ create batch dataset
-    train_dataset = CombinedDataset(train_dir, split="train", num_frames=3, img_size=224, bands=6, cloud_range=cloud_range,
-                              # random_cropping=random_cropping, remove_cloud=True, 
-                               normalize=True, training_length=training_length)
+    # create training dataset
+    train_dataset = CombinedDataset(train_dir, split="train", num_frames=3, img_size=224, bands=6, cloud_range=cloud_range, normalize=True, training_length=training_length)
     if rank == 0:
         print(f"--> Training set len = {len(train_dataset)}")
     if rank == 0:
         print(f"--> Training set masks = {train_dataset.n_cloudpaths}")
 
-    val_dataset = CombinedDataset(train_dir, split="validate", num_frames=3, img_size=224, bands=6, cloud_range=cloud_range,
-                              # random_cropping=random_cropping, remove_cloud=True, 
-                               normalize=True)
+    # create validation dataset - note that cloud range is constant to ensure that validation metrics are comparable across experiments
+    val_dataset = CombinedDataset(train_dir, split="validate", num_frames=3, img_size=224, bands=6, cloud_range=[0.01,1], normalize=True)
     if rank == 0:
         print(f"--> Validation set len = {len(val_dataset)}")
     if rank == 0:
         print(f"--> Validation set masks = {val_dataset.n_cloudpaths}")
     
+    # save catalogs for all image and cloud chips to the csv log directory
     train_dataset.cloud_catalog.to_csv(os.path.join(csv_log_dir, "train_cloud_catalog.csv"), index=False)
     val_dataset.cloud_catalog.to_csv(os.path.join(csv_log_dir, "val_cloud_catalog.csv"), index=False)
     train_dataset.tif_catalog.to_csv(os.path.join(csv_log_dir, "train_tif_catalog.csv"), index=False)
     val_dataset.tif_catalog.to_csv(os.path.join(csv_log_dir, "val_tif_catalog.csv"), index=False)
 
+    # initialize samplers, note that we use a sequential sampler for identical validation sets each time
     train_sampler = torch.utils.data.RandomSampler(train_dataset, replacement=True)
     val_sampler = torch.utils.data.SequentialSampler(val_dataset)
 
+    # get arguments for training and testing loaders and initialize them
     train_kwargs = {"batch_size": batch_size, "sampler": train_sampler}
     test_kwargs = {"batch_size": batch_size, "sampler": val_sampler}
     common_kwargs = {
-        #"num_workers": num_workers,
         "pin_memory": False,
         "drop_last": True
     }
@@ -626,12 +702,12 @@ def fsdp_main(args):
     torch.cuda.empty_cache()
 
     model = model.to(torch.cuda.current_device())
-    # model = DDP(model, device_ids=[torch.cuda.current_device()])
 
     # optimizer and learning rate decay
     optimizer = optim.AdamW(model.parameters(), lr=lr)
     scheduler = OneCycleLR(optimizer, max_lr=lr*10, steps_per_epoch=len(train_loader), epochs=epochs)
 
+    # initialize best validation loss and best validation ssim
     best_val_loss = float("inf")
     best_val_ssim = 0
 
@@ -659,7 +735,7 @@ def fsdp_main(args):
     )
     torch_profiler = None
 
-    # Log Writers
+    # log writers
     if rank == 0:
         tensorboard_writer = SummaryWriter(tensorboard_log_dir)
         os.makedirs(csv_log_dir, exist_ok=True)
@@ -671,17 +747,19 @@ def fsdp_main(args):
     # -- Start Training -----
     for epoch in range(1, epochs + 1):
         print('training ' + str(epoch) + ' rank ' + str(rank))
+        
         if rank == 0:
             print(f"\n--> Starting Epoch {epoch}")
 
             t0 = time.time()
+        
+        # run training for epoch
         train_loss, train_mask_ratio, train_ssim, train_mse, train_mae = train(
             model,
             mask_ratio,
             local_rank,
             rank,
             train_loader,
-          #  mask_train_loader_list,
             optimizer,
             epoch,
             sampler=train_sampler,
@@ -690,9 +768,10 @@ def fsdp_main(args):
             vis_path=vis_dir,
         )
 
+        # run validation for epoch
         curr_val_loss, val_mask_ratio, val_ssim, val_mse, val_mae = validation(model, mask_ratio, local_rank, rank, test_loader, epoch, vis_path=vis_dir)
 
-        # Write logs in two formats: tensorboard and csv.
+        # write logs in two formats: tensorboard and csv.
         if rank == 0:
             tensorboard_writer.add_scalar("LR", scheduler.get_last_lr()[0], epoch)
             tensorboard_writer.add_scalars("Loss", {
@@ -704,6 +783,7 @@ def fsdp_main(args):
             tensorboard_writer.flush()
             log_writer.flush()
 
+        # saving and statistics
         if rank == 0:
             print(f"--> epoch {epoch} completed...entering save and stats zone")
 
@@ -726,6 +806,7 @@ def fsdp_main(args):
                 torch.save(model.state_dict(), checkpoint_file)
                 print(f"--> saved {checkpoint_file} to COS")
 
+        # save this epochs checkpoint if val ssim is current best
         if val_ssim > best_val_ssim:
             if rank == 0:
                 print(f"--> saving model ...")
@@ -744,7 +825,6 @@ def fsdp_main(args):
             best_val_ssim = val_ssim
             print(f"-->>>> New Val Loss Record: {best_val_ssim}")
 
-    # init_end_event.record()
     if rank == 0:
 
         total_training_time = time.time() - training_start_time
@@ -769,7 +849,7 @@ def fsdp_main(args):
         tensorboard_writer.close()
         log_writer.close()
 
-        # Update job info file
+        # update job info file
         with open(os.path.join(job_info_dir, f'{job_id}.yaml'), 'r') as f:
             params_dict = yaml.safe_load(f)
             params_dict['job_finish_time'] = f"{time.strftime('%Y-%m-%d %H:%M:%S')}"
@@ -777,13 +857,7 @@ def fsdp_main(args):
         with open(os.path.join(job_info_dir, f'{job_id}.yaml'), 'w') as f:
             yaml.safe_dump(params_dict, f, default_flow_style=None, sort_keys=False)
 
-    # all done, set barrier to ensure all GPU's complete, and then cleanup
-    # dist.barrier()
-    # dist.destroy_process_group()
-
-
 # ------------------ Main functions above ------------
-
 
 if __name__ == "__main__":
     args = get_args_parser()
