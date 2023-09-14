@@ -5,7 +5,7 @@ FROM continuumio/miniconda3:23.3.1-0
 RUN pip install --upgrade pip
 RUN apt-get update && apt-get install -y vim tmux && \
     pip install pip-tools
-RUN pip install transformers==4.21.2 timm==0.9.2 einops==0.6.1 rasterio==1.3.7 tensorboard==2.13.0 datasets tqdm protobuf colorama scikit-learn seaborn==0.12.2 matplotlib==3.7.2 && \
+RUN pip install pandas==2.0.3 transformers==4.21.2 timm==0.9.2 einops==0.6.1 rasterio==1.3.7 tensorboard==2.13.0 datasets==2.14.5 tqdm==4.65.0 protobuf==4.24.3 colorama==0.4.6 scikit-learn==1.3.0 seaborn==0.12.2 matplotlib==3.7.2 && \
 	pip uninstall torch torchaudio torchvision -y
 
 WORKDIR /workspace
