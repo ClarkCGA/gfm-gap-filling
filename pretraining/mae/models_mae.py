@@ -55,22 +55,16 @@ class PatchEmbed(nn.Module):
         self.norm = norm_layer(embed_dim) if norm_layer else nn.Identity()
 
     def forward(self, x):
-      #  print('forward PE')
         B, C, T, H, W = x.shape
-     #   print(x.shape) # [4, 4, 3, 224, 224]
         _assert(H == self.img_size[0], f"Input image height ({H}) doesn't match model ({self.img_size[0]}).")
         _assert(W == self.img_size[1], f"Input image width ({W}) doesn't match model ({self.img_size[1]}).")
-        x = self.proj(x) ## this line is a Conv3D, but we had thought it is just a reshape... 
-     #   print(x.shape) # ([4, 1024, 3, 14, 14]) ## 1024 is from embed_dim
+        # after self.proj(x), the tensor will be (Channels, Embed_Dimensions, Time Steps, Patch Size, Patch Size)
+        x = self.proj(x)
         if self.flatten:
-          #  print('flatten')
             x = x.flatten(2)
-          #  print(x.shape)
             x = x.transpose(1, 2)  # B,C,T,H,W -> B,C,L -> B,L,C
-           # print(x.shape)
-    #    print(x.shape) # [4, 588, 1024]
         x = self.norm(x)
-     #   print(x.shape) # [4, 588, 1024]
+
         return x
 
 
@@ -204,79 +198,31 @@ class MaskedAutoencoderViT(nn.Module):
         x: [N, L, D], sequence
         """
         N, L, D = x.shape  # batch, length, dim
-       # len_keep = int(L * (1 - mask_ratio))
-     #   print('rm')
-    #    print('rm x')
-     #   print(x.shape)
-      #  print(x)
-     #   print('rm label mask')
-     #   print(label_mask_patch.shape)
-     #   print(label_mask_patch)
+
         label_mask_patch_max, _ = torch.max(label_mask_patch, dim=-1)
-        ## CHECKS FOR MASKING
-      #  print('max shape')
-      #  print(label_mask_patch_max.shape)
-      #  print(label_mask_patch_max[:,0:50])
-        ## WHEN COUNTING UNMASKED PATCHES, ONLY COUNT FOR 1 BATCH
+
         label_mask_zero_count = (label_mask_patch_max[0, :] == 0.).sum().item()
-      #  print('max sum')
-       # print(label_mask_patch_max[0, :].sum())
-        
-        #print('zero count')
-        #print(label_mask_zero_count)
-        #print('after max')
-        #print(label_mask_patch_max.shape) # [2, 588]
-        #print(label_mask_patch_max.sum()) # [2, 588]
 
-        
         label_mask_patch = label_mask_patch_max.unsqueeze(-1).expand_as(label_mask_patch)
-       # print('max unsqueeze')
-        #print(label_mask_patch.shape)
-       # print(label_mask_patch.sum())
-     #   print(label_mask_patch)
-       # print(label_mask_patch[0,0,:].shape)
-       # print(label_mask_patch[0,0,:])
-       # print('patch sums')
-       # for k in range(100):
-       #     print(label_mask_patch[0,k,:].shape)
-        #    print(label_mask_patch[0,k,:].sum())
-        # add pos embed w/o cls token
 
-        
-        
-     #   print(label_mask)
-     #   noise = torch.rand(N, L, device=x.device)  # noise in [0, 1]
-       # print('rm noise')
-      #  print(noise.shape)
-
-#### REPLACE NOISE AND len_keep
+        #### REPLACE NOISE AND len_keep
         noise = label_mask_patch_max
         len_keep = label_mask_zero_count
-    #    print('rm noise')
-     #   print(noise.shape)
-      #  print('len keep')
-       # print(len_keep) 
-        
+
         # sort noise for each sample
         ids_shuffle = torch.argsort(noise, dim=1)  # ascend: small is keep, large is remove
-       # print('ids_shuffle')
-       # print(ids_shuffle.shape)
-       # print(ids_shuffle)
+
         ids_restore = torch.argsort(ids_shuffle, dim=1)
-       # print('ids restore')
-       # print(ids_restore.shape)
-        #print(ids_restore)
+
         # keep the first subset
         ids_keep = ids_shuffle[:, :len_keep]
-        ## CHECKS FOR MASKING
-     #   print('ids keep')
-     #   print(ids_keep.shape)
-     #   print(ids_keep)
+
         x_masked = torch.gather(x, dim=1, index=ids_keep.unsqueeze(-1).repeat(1, 1, D))
 
         # generate the binary mask: 0 is keep, 1 is remove
         mask = torch.ones([N, L], device=x.device)
         mask[:, :len_keep] = 0
+
         # unshuffle to get the binary mask
         mask = torch.gather(mask, dim=1, index=ids_restore)
 
@@ -284,27 +230,13 @@ class MaskedAutoencoderViT(nn.Module):
 
     def forward_encoder(self, x, label_mask_patch, mask_ratio):
         # embed patches
-      #  print('forward encoder')
-     #   print(x.shape)
-     #   print(label_mask_patch.shape)
-       # print(label_mask_patch)
-
-
-        
         x = self.patch_embed(x)
-      #  print('x patch embed')
-      #  print(x.shape) # [2, 588, 1024]
 
-
-        #label_mask_patch = self.patch_embed(label_mask_patch)
         label_mask_patch = self.patchify(label_mask_patch)  # B,C,T,H,W -> B,L,D
         # B,T,C,H,W -> B,T,
-        #print('after patchify')
-        #print(label_mask_patch.shape) # [2, 588, 1024]
-  
-        x = x + self.pos_embed[:, 1:, :]
-        #print(x.shape)
 
+        x = x + self.pos_embed[:, 1:, :]
+  
         # masking: length -> length * mask_ratio
         x, mask, ids_restore = self.label_masking(x, label_mask_patch, mask_ratio)
 
@@ -361,19 +293,11 @@ class MaskedAutoencoderViT(nn.Module):
 
         loss = (pred - target) ** 2
         loss = loss.mean(dim=-1)  # [N, L], mean loss per patch
-     #   print('forward loss')
-     #   print(pred.shape)
-    #    print(mask.shape)
-     #   print(loss)
-    #    print(mask.sum())
-       # print('mask sum')
-        #print(mask.sum())
+
         loss = (loss * mask).sum() / mask.sum()  # mean loss on removed patches
         return loss
 
     def forward(self, imgs, label_mask_batch, mask_ratio=0.75):
-      #  print('forward')
-      #  print(label_mask_batch)
         latent, mask, ids_restore = self.forward_encoder(imgs, label_mask_batch, mask_ratio)
         pred = self.forward_decoder(latent, ids_restore)
         loss = self.forward_loss(imgs, pred, mask)
