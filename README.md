@@ -12,7 +12,7 @@ MAE overview https://huggingface.co/docs/transformers/model_doc/vit_mae
 Directories should be structured as follows:
 
 ```
-cgan/
+gfm/
 ├── gfm-gap-filling/
 │ ├── pretraining/
 │ │ ├── training_data/
