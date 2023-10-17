@@ -1,0 +1,5 @@
+*.pt
+*.yaml
+train_single_band/
+__pycache__/
+.ipynb_checkpoints/
