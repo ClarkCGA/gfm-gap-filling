@@ -195,7 +195,7 @@ class CombinedDataset(Dataset):
         if self.split == "validate":
             for p in self.mask_position:
                 # when validating, we remove randomness by looping through the index of the cloud path list
-                cloudscene = read_tif_as_np_array(self.cloud_paths[index % self.n_cloudpaths]) 
+                cloudscene = read_tif_as_np_array(self.cloud_paths[(index + (p-1)) % self.n_cloudpaths]) 
                 cloudscene = np.expand_dims(cloudscene, 0)
                 cloudbrick[p-1,:,:,:] = cloudscene 
                 del cloudscene

@@ -46,8 +46,7 @@ class CombinedDataset(Dataset):
                  normalize=True, 
                  training_length=6321,
                  mean=[495.7316,  814.1386,  924.5740, 2962.5623, 2640.8833, 1740.3031], 
-                 std=[286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625], 
-                 mask_position = [2]):
+                 std=[286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625]):
         
         # get all directories needed for reading in chips
         self.root_dir = pathlib.Path(data_path)
@@ -57,7 +56,7 @@ class CombinedDataset(Dataset):
         # set parameters
         self.split = split
         self.num_frames = num_frames
-        self.mask_position = mask_position
+        self.mask_position = [[1],[2],[3],[1,2],[2,3],[1,3],[1,2,3]]
         self.img_size = img_size
         self.bands = bands
         self.num_hls_bands = num_hls_bands
@@ -182,20 +181,22 @@ class CombinedDataset(Dataset):
         groundtruth = groundtruth.reshape(self.num_frames, self.bands, self.img_size, self.img_size)
 
         # initialize empty cloud mask with same dimensions as ground truth
-        cloudbrick = np.zeros_like(groundtruth)
+        cloudbrick = np.zeros_like(groundtruth
+
+        mask_position = self.mask_position[index % 7] # this loops through the possible combinations of mask position
 
         # for every specified mask position in training, read in a random cloud scene and add to the block of cloud masks
         if self.split == "train":
-            for p in self.mask_position:
+            for p in mask_position:
                 cloudscene = read_tif_as_np_array(self.cloud_paths[np.random.randint(0,self.n_cloudpaths-1)])
                 cloudscene = np.expand_dims(cloudscene, 0)
                 cloudbrick[p-1,:,:,:] = cloudscene
                 del cloudscene
 
         if self.split == "validate":
-            for p in self.mask_position:
+            for p in mask_position:
                 # when validating, we remove randomness by looping through the index of the cloud path list
-                cloudscene = read_tif_as_np_array(self.cloud_paths[index % self.n_cloudpaths]) 
+                cloudscene = read_tif_as_np_array(self.cloud_paths[(index + (p-1)) % self.n_cloudpaths]) 
                 cloudscene = np.expand_dims(cloudscene, 0)
                 cloudbrick[p-1,:,:,:] = cloudscene 
                 del cloudscene
@@ -412,7 +413,7 @@ def train(
         
         # get ssim between the masked ground truth and the masked predicted image, only in the center time step
         # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
-        ssim_score = StructuralSimilarity(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
+        ssim_score = StructuralSimilarity(predicted_masked, input_masked)
 
         # add ssim to running total
         ssim[0] += ssim_score.item()
@@ -421,8 +422,8 @@ def train(
         # get mean squared error between the masked ground truth and the masked predicted image, only in the center time step
         # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
         # then, divide by the mean of the input mask in the center time step to normalize the mse to reflect that we are only looking at masked pixels
-        mse_score = mean_squared_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
-        mse_score /= (torch.mean(input_mask[:,:,1,:,:]))
+        mse_score = mean_squared_error(predicted_masked, input_masked)
+        mse_score /= (torch.mean(input_mask))
         
         # add mse to running total
         mse[0] += mse_score.item()
@@ -431,8 +432,8 @@ def train(
         # get mean absolute error between the masked ground truth and the masked predicted image, only in the center time step
         # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
         # then, divide by the mean of the input mask in the center time step to normalize the mse to reflect that we are only looking at masked pixels
-        mae_score = mean_abs_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
-        mae_score /= (torch.mean(input_mask[:,:,1,:,:]))
+        mae_score = mean_abs_error(predicted_masked, input_masked)
+        mae_score /= (torch.mean(input_mask))
         
         # add mae to running total
         mae[0] += mae_score.item()
@@ -513,7 +514,7 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             
             # get ssim between the masked ground truth and the masked predicted image, only in the center time step
             # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
-            ssim_score = StructuralSimilarity(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
+            ssim_score = StructuralSimilarity(predicted_masked, input_masked)
 
             # Add ssim to running total
             ssim[0] += ssim_score.item()
@@ -522,8 +523,8 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             # get mean squared error between the masked ground truth and the masked predicted image, only in the center time step
             # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
             # then, divide by the mean of the input mask in the center time step to normalize the mse to reflect that we are only looking at masked pixels
-            mse_score = mean_squared_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
-            mse_score /= (torch.mean(input_mask[:,:,1,:,:]))
+            mse_score = mean_squared_error(predicted_masked, input_masked)
+            mse_score /= (torch.mean(input_mask))
             
             # add mse to running total
             mse[0] += mse_score.item()
@@ -532,8 +533,8 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             # get mean absolute error between the masked ground truth and the masked predicted image, only in the center time step
             # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
             # then, divide by the mean of the input mask in the center time step to normalize the mse to reflect that we are only looking at masked pixels
-            mae_score = mean_abs_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
-            mae_score /= (torch.mean(input_mask[:,:,1,:,:]))
+            mae_score = mean_abs_error(predicted_masked, input_masked)
+            mae_score /= (torch.mean(input_mask))
             
             # add mae to running total
             mae[0] += mae_score.item()
