@@ -57,7 +57,7 @@ class CombinedDataset(Dataset):
         # set parameters
         self.split = split
         self.num_frames = num_frames
-        self.mask_position = mask_position
+        self.mask_position = [[1],[2],[3],[1,2],[2,3],[1,3],[1,2,3]]
         self.img_size = img_size
         self.bands = bands
         self.num_hls_bands = num_hls_bands
@@ -184,16 +184,18 @@ class CombinedDataset(Dataset):
         # initialize empty cloud mask with same dimensions as ground truth
         cloudbrick = np.zeros_like(groundtruth)
 
+        mask_position = self.mask_position[index % 7] # this loops through the possible combinations of mask position
+
         # for every specified mask position in training, read in a random cloud scene and add to the block of cloud masks
         if self.split == "train":
-            for p in self.mask_position:
+            for p in mask_position:
                 cloudscene = read_tif_as_np_array(self.cloud_paths[np.random.randint(0,self.n_cloudpaths-1)])
                 cloudscene = np.expand_dims(cloudscene, 0)
                 cloudbrick[p-1,:,:,:] = cloudscene
                 del cloudscene
 
         if self.split == "validate":
-            for p in self.mask_position:
+            for p in mask_position:
                 # when validating, we remove randomness by looping through the index of the cloud path list
                 cloudscene = read_tif_as_np_array(self.cloud_paths[(index + (p-1)) % self.n_cloudpaths]) 
                 cloudscene = np.expand_dims(cloudscene, 0)
@@ -207,8 +209,8 @@ class CombinedDataset(Dataset):
 
         # return tensor with dimensions (mask-or-image, bands, time steps, height, width)
         return combined_data
-
-def visualize_tcc(vis_path, n_epoch, idx, input, input_mask, predicted):
+        
+def visualize_tcc(vis_path, idx, input, input_mask, predicted):
     """
     Generate and save visualizations of inputs and outputs to the model as true color composites.
     This function will only create visualizations for the first tensor in the batch.
@@ -264,7 +266,7 @@ def visualize_tcc(vis_path, n_epoch, idx, input, input_mask, predicted):
 
     # save full visualization tensor to visualization directory, formatted as epoch{n_epoch}_idx{idx}_gen.jpg
     torchvision.utils.save_image(
-        full_vis, os.path.join(vis_path, "epoch{:04}_idx{:04}_gen.jpg".format(n_epoch, idx)),
+        full_vis, os.path.join(vis_path, "idx{:04}_gen.jpg".format(idx)),
     )
 
 def get_args_parser():
@@ -380,7 +382,7 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             loss, pred, mask = model(batch.to(local_rank), label_mask_batch.to(local_rank), mask_ratio)
 
             # add mean of mask to running total, adjust to only one mask position
-            mask_ratio[0] += torch.mean(mask) * 3
+            mask_ratio[0] += torch.mean(mask)
             mask_ratio[1] += 1
             
             # add loss to running total - this is based on z-normalized data
@@ -400,12 +402,12 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             predicted_masked = predicted * input_mask # get only predicted pixels in masked areas
 
             # run visualize_tcc for every 5th batch
-            if i % 5 == 0:
-                 visualize_tcc(vis_path, i, input, input_mask, processed_mask, predicted)
+            if i <= 30:
+                 visualize_tcc(vis_path, i, input, input_mask, predicted)
             
             # get ssim between the masked ground truth and the masked predicted image, only in the center time step
             # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
-            ssim_score = StructuralSimilarity(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
+            ssim_score = StructuralSimilarity(predicted_masked.view(1, -1, 224, 224), input_masked.view(1, -1, 224, 224))
 
             # Add ssim to running total
             ssim[0] += ssim_score
@@ -450,7 +452,7 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
                 # Append to the list of per band mae for this batch
                 per_band_mae_list.append(per_band_mae.item())
                 # Get the SSIM for only that band at the middle time step.
-                per_band_ssim_score = StructuralSimilarity(predicted_masked[:,n:n+1,1,:,:], input_masked[:,n:n+1,1,:,:])
+                per_band_ssim_score = StructuralSimilarity(predicted_masked[:,n,:,:,:], input_masked[:,n,:,:,:])
                 # Append to the list of per band SSIM for this batch
                 per_band_ssim_list.append(per_band_ssim_score.item())
 
@@ -458,7 +460,7 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             data_list.append({'Overall SSIM':ssim_score.item(), 
                               'Overall MSE':mse_score.item(),
                               'Overall MAE':mae_score.item(),
-                              'Mask Ratio':torch.mean(mask).item() * 3,
+                              'Mask Ratio':torch.mean(mask).item(),
                               'B02 MSE': per_band_mse_list[0],
                               'B03 MSE': per_band_mse_list[1],
                               'B04 MSE': per_band_mse_list[2],

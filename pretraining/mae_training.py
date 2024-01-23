@@ -181,7 +181,7 @@ class CombinedDataset(Dataset):
         groundtruth = groundtruth.reshape(self.num_frames, self.bands, self.img_size, self.img_size)
 
         # initialize empty cloud mask with same dimensions as ground truth
-        cloudbrick = np.zeros_like(groundtruth
+        cloudbrick = np.zeros_like(groundtruth)
 
         mask_position = self.mask_position[index % 7] # this loops through the possible combinations of mask position
 
@@ -315,7 +315,7 @@ def get_args_parser():
                         help='Masking ratio (percentage of removed patches).')
     parser.add_argument('--tubelet_size', default=1, type=int,
                         help='Temporal patch size.')
-    parser.add_argument('--checkpoint', default='/workspace/gfm-gap-filling/pretraining/epoch-832-loss-0.0473.pt', type=str,
+    parser.add_argument('--checkpoint', default='/workspace/gfm-gap-filling/pretraining/Prithvi_100M.pt', type=str,
                         help='Path to a checkpoint file to load from.')
 
     # training related
@@ -413,7 +413,7 @@ def train(
         
         # get ssim between the masked ground truth and the masked predicted image, only in the center time step
         # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
-        ssim_score = StructuralSimilarity(predicted_masked, input_masked)
+        ssim_score = StructuralSimilarity(predicted_masked.view(16, -1, 224, 224), input_masked.view(16, -1, 224, 224))
 
         # add ssim to running total
         ssim[0] += ssim_score.item()
@@ -496,7 +496,7 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             loss, pred, mask = model(batch, label_mask_batch, mask_ratio)
             
             # add mean of mask to running total, adjust to only one mask position
-            mask_ratio[0] += torch.mean(mask) * 3
+            mask_ratio[0] += torch.mean(mask)
             mask_ratio[1] += 1
 
             # add loss to running total - this is based on z-normalized data
@@ -514,7 +514,7 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             
             # get ssim between the masked ground truth and the masked predicted image, only in the center time step
             # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
-            ssim_score = StructuralSimilarity(predicted_masked, input_masked)
+            ssim_score = StructuralSimilarity(predicted_masked.view(16, -1, 224, 224), input_masked.view(16, -1, 224, 224))
 
             # Add ssim to running total
             ssim[0] += ssim_score.item()
