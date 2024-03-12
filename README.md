@@ -36,7 +36,7 @@ In order to run the fine-tuning script, run mae_training.py on the command line 
 
 
 ```
-python -m mae_training --train_dir "/workspace/gfm-gap-filling/pretraining/training_data" --batch_size 16 --num_epochs 200 --embed_dim 768 --cloud_range 0.01 1.0 --local_rank 0 --training_len 400
+python -m mae_training --train_dir "/workspace/gfm-gap-filling/pretraining/training_data" --batch_size 16 --num_epochs 200 --embed_dim 768 --cloud_range 0.01 1.0 --training_len 400 --local_rank 0 
 ```
 **--train_dir** should point to the data directory containing .csv chip trackers and subfolders for hls data and cloud masks.
 

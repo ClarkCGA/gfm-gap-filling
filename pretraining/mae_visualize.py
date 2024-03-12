@@ -46,8 +46,7 @@ class CombinedDataset(Dataset):
                  normalize=True, 
                  training_length=6321,
                  mean=[495.7316,  814.1386,  924.5740, 2962.5623, 2640.8833, 1740.3031], 
-                 std=[286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625], 
-                 mask_position = [2]):
+                 std=[286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625]):
         
         # get all directories needed for reading in chips
         self.root_dir = pathlib.Path(data_path)
@@ -209,7 +208,7 @@ class CombinedDataset(Dataset):
 
         # return tensor with dimensions (mask-or-image, bands, time steps, height, width)
         return combined_data
-        
+
 def visualize_tcc(vis_path, idx, input, input_mask, predicted):
     """
     Generate and save visualizations of inputs and outputs to the model as true color composites.
@@ -402,7 +401,7 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             predicted_masked = predicted * input_mask # get only predicted pixels in masked areas
 
             # run visualize_tcc for every 5th batch
-            if i <= 30:
+            if i % 80 == 0:
                  visualize_tcc(vis_path, i, input, input_mask, predicted)
             
             # get ssim between the masked ground truth and the masked predicted image, only in the center time step

@@ -753,7 +753,10 @@ def fsdp_main(args):
             print(f"\n--> Starting Epoch {epoch}")
 
             t0 = time.time()
-        
+
+        # run validation for epoch
+        curr_val_loss, val_mask_ratio, val_ssim, val_mse, val_mae = validation(model, mask_ratio, local_rank, rank, test_loader, epoch, vis_path=vis_dir)
+
         # run training for epoch
         train_loss, train_mask_ratio, train_ssim, train_mse, train_mae = train(
             model,
@@ -770,7 +773,7 @@ def fsdp_main(args):
         )
 
         # run validation for epoch
-        curr_val_loss, val_mask_ratio, val_ssim, val_mse, val_mae = validation(model, mask_ratio, local_rank, rank, test_loader, epoch, vis_path=vis_dir)
+        # curr_val_loss, val_mask_ratio, val_ssim, val_mse, val_mae = validation(model, mask_ratio, local_rank, rank, test_loader, epoch, vis_path=vis_dir)
 
         # write logs in two formats: tensorboard and csv.
         if rank == 0:
@@ -798,24 +801,24 @@ def fsdp_main(args):
             )
 
         # save this epochs checkpoint if val loss is current best
-        if curr_val_loss < best_val_loss:
-            if rank == 0:
-                print(f"--> saving model ...")
-                filename = "model_best.pt"
-                checkpoint_file = os.path.join(ckpt_dir, filename)
-                os.makedirs(ckpt_dir, exist_ok=True)
-                torch.save(model.state_dict(), checkpoint_file)
-                print(f"--> saved {checkpoint_file} to COS")
+        # if curr_val_loss < best_val_loss:
+        #     if rank == 0:
+        #        print(f"--> saving model ...")
+        #        filename = "model_best.pt"
+        #        checkpoint_file = os.path.join(ckpt_dir, filename)
+        #        os.makedirs(ckpt_dir, exist_ok=True)
+        #        torch.save(model.state_dict(), checkpoint_file)
+        #        print(f"--> saved {checkpoint_file} to COS")
 
         # save this epochs checkpoint if val ssim is current best
-        if val_ssim > best_val_ssim:
-            if rank == 0:
-                print(f"--> saving model ...")
-                filename = "model_best_ssim.pt"
-                checkpoint_file = os.path.join(ckpt_dir, filename)
-                os.makedirs(ckpt_dir, exist_ok=True)
-                torch.save(model.state_dict(), checkpoint_file)
-                print(f"--> saved {checkpoint_file} to COS")
+        # if val_ssim > best_val_ssim:
+        #    if rank == 0:
+        #        print(f"--> saving model ...")
+        #        filename = "model_best_ssim.pt"
+        #        checkpoint_file = os.path.join(ckpt_dir, filename)
+        #        os.makedirs(ckpt_dir, exist_ok=True)
+        #        torch.save(model.state_dict(), checkpoint_file)
+        #        print(f"--> saved {checkpoint_file} to COS")
 
         # announce new val loss record:
         if rank == 0 and curr_val_loss < best_val_loss:
