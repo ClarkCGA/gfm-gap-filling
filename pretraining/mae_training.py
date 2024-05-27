@@ -45,9 +45,9 @@ class CombinedDataset(Dataset):
                  cloud_range = [0.01,1.0],
                  normalize=True, 
                  training_length=6321,
+                 mask_position = [[1],[2],[3],[1,2],[2,3],[1,3],[1,2,3]],
                  mean=[495.7316,  814.1386,  924.5740, 2962.5623, 2640.8833, 1740.3031], 
-                 std=[286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625], 
-                 mask_position = [2]):
+                 std=[286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625]):
         
         # get all directories needed for reading in chips
         self.root_dir = pathlib.Path(data_path)
@@ -57,12 +57,14 @@ class CombinedDataset(Dataset):
         # set parameters
         self.split = split
         self.num_frames = num_frames
-        self.mask_position = mask_position
+        self.mask_position = [[int(p) for p in pos_list] for pos_list in mask_position]
         self.img_size = img_size
         self.bands = bands
         self.num_hls_bands = num_hls_bands
         self.training_length = training_length
         self.normalize = normalize
+
+        print(self.mask_position)
 
         # ensure that validation cloud range is always the same across experiments
         if self.split == "train":
@@ -96,7 +98,7 @@ class CombinedDataset(Dataset):
         The CSV file should be named "final_chip_tracker.csv" and located within the root directory.
     """
         
-        csv = pd.read_csv(self.root_dir.joinpath("final_chip_tracker.csv")) # access chip tracker
+        csv = pd.read_csv(self.root_dir.joinpath("chip_catalog.csv")) # access chip tracker
         
         # filter csv by split, bad_pct_max and na_count
         catalog = csv.loc[(csv["usage"] == self.split) & (csv["bad_pct_max"] < 5) & (csv["na_count"] == 0)] 
@@ -131,7 +133,7 @@ class CombinedDataset(Dataset):
     Note:
         The CSV file should be named "fmask_tracker_balanced.csv" and located within the root directory.
     """
-        csv = pd.read_csv(self.root_dir.joinpath("fmask_tracker_balanced.csv")) # access cloud tracker
+        csv = pd.read_csv(self.root_dir.joinpath("cloud_catalog.csv")) # access cloud tracker
 
         # filter csv by usage and cloud cover range defined when initializing the dataset
         catalog = csv.loc[(csv["usage"] == self.split) & (csv["cloud_pct"] <= self.cloud_range[1]) & (csv["cloud_pct"] >= self.cloud_range[0])]
@@ -184,18 +186,20 @@ class CombinedDataset(Dataset):
         # initialize empty cloud mask with same dimensions as ground truth
         cloudbrick = np.zeros_like(groundtruth)
 
+        mask_position = self.mask_position[index % len(self.mask_position)] # this loops through the possible combinations of mask position
+
         # for every specified mask position in training, read in a random cloud scene and add to the block of cloud masks
         if self.split == "train":
-            for p in self.mask_position:
+            for p in mask_position:
                 cloudscene = read_tif_as_np_array(self.cloud_paths[np.random.randint(0,self.n_cloudpaths-1)])
                 cloudscene = np.expand_dims(cloudscene, 0)
                 cloudbrick[p-1,:,:,:] = cloudscene
                 del cloudscene
 
         if self.split == "validate":
-            for p in self.mask_position:
+            for p in mask_position:
                 # when validating, we remove randomness by looping through the index of the cloud path list
-                cloudscene = read_tif_as_np_array(self.cloud_paths[index % self.n_cloudpaths]) 
+                cloudscene = read_tif_as_np_array(self.cloud_paths[(index + (p-1)) % self.n_cloudpaths]) 
                 cloudscene = np.expand_dims(cloudscene, 0)
                 cloudbrick[p-1,:,:,:] = cloudscene 
                 del cloudscene
@@ -301,6 +305,15 @@ def get_args_parser():
         nargs="+",
         help="Lower and upper boundaries for cloud ratios",
     )
+    
+    parser.add_argument(
+        "--mask_position", 
+        type=list, 
+        nargs='+', 
+        default=[[1],[2],[3],[1,2],[2,3],[1,3],[1,2,3]], 
+        help="Position of cloud mask. Use 1, 2, or 3 in combinations - e.g. --mask_position 1 2 3 12 13 23 123",
+    )   
+    
     # model related
     parser.add_argument('--num_layers', default=12, type=int,
                         help='Number of layers in the model.')
@@ -314,7 +327,7 @@ def get_args_parser():
                         help='Masking ratio (percentage of removed patches).')
     parser.add_argument('--tubelet_size', default=1, type=int,
                         help='Temporal patch size.')
-    parser.add_argument('--checkpoint', default='/workspace/gfm-gap-filling/pretraining/epoch-832-loss-0.0473.pt', type=str,
+    parser.add_argument('--checkpoint', default='/workspace/gfm-gap-filling/pretraining/Prithvi_100M.pt', type=str,
                         help='Path to a checkpoint file to load from.')
 
     # training related
@@ -412,7 +425,7 @@ def train(
         
         # get ssim between the masked ground truth and the masked predicted image, only in the center time step
         # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
-        ssim_score = StructuralSimilarity(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
+        ssim_score = StructuralSimilarity(predicted_masked.view(16, -1, 224, 224), input_masked.view(16, -1, 224, 224))
 
         # add ssim to running total
         ssim[0] += ssim_score.item()
@@ -421,8 +434,8 @@ def train(
         # get mean squared error between the masked ground truth and the masked predicted image, only in the center time step
         # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
         # then, divide by the mean of the input mask in the center time step to normalize the mse to reflect that we are only looking at masked pixels
-        mse_score = mean_squared_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
-        mse_score /= (torch.mean(input_mask[:,:,1,:,:]))
+        mse_score = mean_squared_error(predicted_masked, input_masked)
+        mse_score /= (torch.mean(input_mask))
         
         # add mse to running total
         mse[0] += mse_score.item()
@@ -431,8 +444,8 @@ def train(
         # get mean absolute error between the masked ground truth and the masked predicted image, only in the center time step
         # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
         # then, divide by the mean of the input mask in the center time step to normalize the mse to reflect that we are only looking at masked pixels
-        mae_score = mean_abs_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
-        mae_score /= (torch.mean(input_mask[:,:,1,:,:]))
+        mae_score = mean_abs_error(predicted_masked, input_masked)
+        mae_score /= (torch.mean(input_mask))
         
         # add mae to running total
         mae[0] += mae_score.item()
@@ -495,7 +508,7 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             loss, pred, mask = model(batch, label_mask_batch, mask_ratio)
             
             # add mean of mask to running total, adjust to only one mask position
-            mask_ratio[0] += torch.mean(mask) * 3
+            mask_ratio[0] += torch.mean(mask)
             mask_ratio[1] += 1
 
             # add loss to running total - this is based on z-normalized data
@@ -513,7 +526,7 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             
             # get ssim between the masked ground truth and the masked predicted image, only in the center time step
             # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
-            ssim_score = StructuralSimilarity(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
+            ssim_score = StructuralSimilarity(predicted_masked.view(16, -1, 224, 224), input_masked.view(16, -1, 224, 224))
 
             # Add ssim to running total
             ssim[0] += ssim_score.item()
@@ -522,8 +535,8 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             # get mean squared error between the masked ground truth and the masked predicted image, only in the center time step
             # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
             # then, divide by the mean of the input mask in the center time step to normalize the mse to reflect that we are only looking at masked pixels
-            mse_score = mean_squared_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
-            mse_score /= (torch.mean(input_mask[:,:,1,:,:]))
+            mse_score = mean_squared_error(predicted_masked, input_masked)
+            mse_score /= (torch.mean(input_mask))
             
             # add mse to running total
             mse[0] += mse_score.item()
@@ -532,8 +545,8 @@ def validation(model, mask_ratio, local_rank, rank, test_loader, n_epoch, vis_pa
             # get mean absolute error between the masked ground truth and the masked predicted image, only in the center time step
             # this assumes that the only mask is in the central time step, this must be changed for masking at multiple time steps
             # then, divide by the mean of the input mask in the center time step to normalize the mse to reflect that we are only looking at masked pixels
-            mae_score = mean_abs_error(predicted_masked[:,:,1,:,:], input_masked[:,:,1,:,:])
-            mae_score /= (torch.mean(input_mask[:,:,1,:,:]))
+            mae_score = mean_abs_error(predicted_masked, input_masked)
+            mae_score /= (torch.mean(input_mask))
             
             # add mae to running total
             mae[0] += mae_score.item()
@@ -579,6 +592,7 @@ def fsdp_main(args):
     num_hls_bands = len(bands)
     cloud_range = args.cloud_range
     training_length = args.training_length
+    mask_position = args.mask_position
     num_workers = args.data_loader_num_workers
 
     # model related
@@ -661,14 +675,14 @@ def fsdp_main(args):
         print(f"\n--> model has {total_params / 1e6} Million params.\n")
 
     # create training dataset
-    train_dataset = CombinedDataset(train_dir, split="train", num_frames=3, img_size=224, bands=6, cloud_range=cloud_range, normalize=True, training_length=training_length)
+    train_dataset = CombinedDataset(train_dir, split="train", num_frames=3, img_size=224, bands=6, cloud_range=cloud_range, normalize=True, training_length=training_length, mask_position=mask_position)
     if rank == 0:
         print(f"--> Training set len = {len(train_dataset)}")
     if rank == 0:
         print(f"--> Training set masks = {train_dataset.n_cloudpaths}")
 
     # create validation dataset - note that cloud range is constant to ensure that validation metrics are comparable across experiments
-    val_dataset = CombinedDataset(train_dir, split="validate", num_frames=3, img_size=224, bands=6, cloud_range=[0.01,1], normalize=True)
+    val_dataset = CombinedDataset(train_dir, split="validate", num_frames=3, img_size=224, bands=6, cloud_range=[0.01,1], normalize=True, mask_position=mask_position)
     if rank == 0:
         print(f"--> Validation set len = {len(val_dataset)}")
     if rank == 0:
@@ -752,7 +766,10 @@ def fsdp_main(args):
             print(f"\n--> Starting Epoch {epoch}")
 
             t0 = time.time()
-        
+
+        # run validation for epoch
+        curr_val_loss, val_mask_ratio, val_ssim, val_mse, val_mae = validation(model, mask_ratio, local_rank, rank, test_loader, epoch, vis_path=vis_dir)
+
         # run training for epoch
         train_loss, train_mask_ratio, train_ssim, train_mse, train_mae = train(
             model,
@@ -769,7 +786,7 @@ def fsdp_main(args):
         )
 
         # run validation for epoch
-        curr_val_loss, val_mask_ratio, val_ssim, val_mse, val_mae = validation(model, mask_ratio, local_rank, rank, test_loader, epoch, vis_path=vis_dir)
+        # curr_val_loss, val_mask_ratio, val_ssim, val_mse, val_mae = validation(model, mask_ratio, local_rank, rank, test_loader, epoch, vis_path=vis_dir)
 
         # write logs in two formats: tensorboard and csv.
         if rank == 0:
@@ -797,24 +814,24 @@ def fsdp_main(args):
             )
 
         # save this epochs checkpoint if val loss is current best
-        if curr_val_loss < best_val_loss:
-            if rank == 0:
-                print(f"--> saving model ...")
-                filename = "model_best.pt"
-                checkpoint_file = os.path.join(ckpt_dir, filename)
-                os.makedirs(ckpt_dir, exist_ok=True)
-                torch.save(model.state_dict(), checkpoint_file)
-                print(f"--> saved {checkpoint_file} to COS")
+        # if curr_val_loss < best_val_loss:
+        #     if rank == 0:
+        #        print(f"--> saving model ...")
+        #        filename = "model_best.pt"
+        #        checkpoint_file = os.path.join(ckpt_dir, filename)
+        #        os.makedirs(ckpt_dir, exist_ok=True)
+        #        torch.save(model.state_dict(), checkpoint_file)
+        #        print(f"--> saved {checkpoint_file} to COS")
 
         # save this epochs checkpoint if val ssim is current best
-        if val_ssim > best_val_ssim:
-            if rank == 0:
-                print(f"--> saving model ...")
-                filename = "model_best_ssim.pt"
-                checkpoint_file = os.path.join(ckpt_dir, filename)
-                os.makedirs(ckpt_dir, exist_ok=True)
-                torch.save(model.state_dict(), checkpoint_file)
-                print(f"--> saved {checkpoint_file} to COS")
+        # if val_ssim > best_val_ssim:
+        #    if rank == 0:
+        #        print(f"--> saving model ...")
+        #        filename = "model_best_ssim.pt"
+        #        checkpoint_file = os.path.join(ckpt_dir, filename)
+        #        os.makedirs(ckpt_dir, exist_ok=True)
+        #        torch.save(model.state_dict(), checkpoint_file)
+        #        print(f"--> saved {checkpoint_file} to COS")
 
         # announce new val loss record:
         if rank == 0 and curr_val_loss < best_val_loss:
