@@ -25,9 +25,9 @@ gfm/
 
 ## Running the Docker Image
 
-Navigate to the `gfm` directory and run 
+Navigate to directory `gfm` and run 
 ```
-docker run --gpus all -it -v $PWD:/workspace/ -p 8888:8888 gapf
+docker run --gpus all -it -v $PWD:/workspace/ -p 8888:8888 gapfill
 ```
 This will start a Jupyer Lab session which can be accessed via a web browser.
 
