@@ -28,6 +28,6 @@ RUN pip install torchmetrics==1.0.1
 # RUN pip install --pre torch torchvision --index-url https://download.pytorch.org/whl/nightly/cu117
 
 RUN python3 -m pip install jupyterlab
-EXPOSE 8889
+EXPOSE 8888
 
-ENTRYPOINT ["jupyter", "lab", "--port=8889", "--ip=0.0.0.0", "--allow-root"]
+ENTRYPOINT ["jupyter", "lab", "--port=8888", "--ip=0.0.0.0", "--allow-root"]

@@ -45,6 +45,7 @@ class CombinedDataset(Dataset):
                  cloud_range = [0.01,1.0],
                  normalize=True, 
                  training_length=6321,
+                 mask_position = [[1],[2],[3],[1,2],[2,3],[1,3],[1,2,3]],
                  mean=[495.7316,  814.1386,  924.5740, 2962.5623, 2640.8833, 1740.3031], 
                  std=[286.9569, 359.3304, 576.3471, 892.2656, 945.9432, 916.1625]):
         
@@ -56,12 +57,14 @@ class CombinedDataset(Dataset):
         # set parameters
         self.split = split
         self.num_frames = num_frames
-        self.mask_position = [[1],[2],[3],[1,2],[2,3],[1,3],[1,2,3]]
+        self.mask_position = [[int(p) for p in pos_list] for pos_list in mask_position]
         self.img_size = img_size
         self.bands = bands
         self.num_hls_bands = num_hls_bands
         self.training_length = training_length
         self.normalize = normalize
+
+        print(self.mask_position)
 
         # ensure that validation cloud range is always the same across experiments
         if self.split == "train":
@@ -95,7 +98,7 @@ class CombinedDataset(Dataset):
         The CSV file should be named "final_chip_tracker.csv" and located within the root directory.
     """
         
-        csv = pd.read_csv(self.root_dir.joinpath("final_chip_tracker.csv")) # access chip tracker
+        csv = pd.read_csv(self.root_dir.joinpath("chip_catalog.csv")) # access chip tracker
         
         # filter csv by split, bad_pct_max and na_count
         catalog = csv.loc[(csv["usage"] == self.split) & (csv["bad_pct_max"] < 5) & (csv["na_count"] == 0)] 
@@ -130,7 +133,7 @@ class CombinedDataset(Dataset):
     Note:
         The CSV file should be named "fmask_tracker_balanced.csv" and located within the root directory.
     """
-        csv = pd.read_csv(self.root_dir.joinpath("fmask_tracker_balanced.csv")) # access cloud tracker
+        csv = pd.read_csv(self.root_dir.joinpath("cloud_catalog.csv")) # access cloud tracker
 
         # filter csv by usage and cloud cover range defined when initializing the dataset
         catalog = csv.loc[(csv["usage"] == self.split) & (csv["cloud_pct"] <= self.cloud_range[1]) & (csv["cloud_pct"] >= self.cloud_range[0])]
@@ -183,7 +186,7 @@ class CombinedDataset(Dataset):
         # initialize empty cloud mask with same dimensions as ground truth
         cloudbrick = np.zeros_like(groundtruth)
 
-        mask_position = self.mask_position[index % 7] # this loops through the possible combinations of mask position
+        mask_position = self.mask_position[index % len(self.mask_position)] # this loops through the possible combinations of mask position
 
         # for every specified mask position in training, read in a random cloud scene and add to the block of cloud masks
         if self.split == "train":
@@ -302,6 +305,15 @@ def get_args_parser():
         nargs="+",
         help="Lower and upper boundaries for cloud ratios",
     )
+    
+    parser.add_argument(
+        "--mask_position", 
+        type=list, 
+        nargs='+', 
+        default=[[1],[2],[3],[1,2],[2,3],[1,3],[1,2,3]], 
+        help="Position of cloud mask. Use 1, 2, or 3 in combinations - e.g. --mask_position 1 2 3 12 13 23 123",
+    )   
+    
     # model related
     parser.add_argument('--num_layers', default=12, type=int,
                         help='Number of layers in the model.')
@@ -580,6 +592,7 @@ def fsdp_main(args):
     num_hls_bands = len(bands)
     cloud_range = args.cloud_range
     training_length = args.training_length
+    mask_position = args.mask_position
     num_workers = args.data_loader_num_workers
 
     # model related
@@ -662,14 +675,14 @@ def fsdp_main(args):
         print(f"\n--> model has {total_params / 1e6} Million params.\n")
 
     # create training dataset
-    train_dataset = CombinedDataset(train_dir, split="train", num_frames=3, img_size=224, bands=6, cloud_range=cloud_range, normalize=True, training_length=training_length)
+    train_dataset = CombinedDataset(train_dir, split="train", num_frames=3, img_size=224, bands=6, cloud_range=cloud_range, normalize=True, training_length=training_length, mask_position=mask_position)
     if rank == 0:
         print(f"--> Training set len = {len(train_dataset)}")
     if rank == 0:
         print(f"--> Training set masks = {train_dataset.n_cloudpaths}")
 
     # create validation dataset - note that cloud range is constant to ensure that validation metrics are comparable across experiments
-    val_dataset = CombinedDataset(train_dir, split="validate", num_frames=3, img_size=224, bands=6, cloud_range=[0.01,1], normalize=True)
+    val_dataset = CombinedDataset(train_dir, split="validate", num_frames=3, img_size=224, bands=6, cloud_range=[0.01,1], normalize=True, mask_position=mask_position)
     if rank == 0:
         print(f"--> Validation set len = {len(val_dataset)}")
     if rank == 0:
