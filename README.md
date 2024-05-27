@@ -20,6 +20,7 @@ gfm/
 │ ├── .git
 │ ├── README.md
 ├── data/
+  ├── training_data/
 ```
 
 ## Running the Docker Image
@@ -36,7 +37,7 @@ In order to run the fine-tuning script, run mae_training.py on the command line 
 
 
 ```
-python -m mae_training --train_dir "/workspace/gfm-gap-filling/pretraining/training_data" --batch_size 16 --num_epochs 200 --embed_dim 768 --cloud_range 0.01 1.0 --training_len 400 --local_rank 0 
+python -m mae_training --train_dir "/workspace/data/training_data" --batch_size 16 --num_epochs 200 --embed_dim 768 --cloud_range 0.01 1.0 --mask_position 2 --training_len 400 --local_rank 0 
 ```
 **--train_dir** should point to the data directory containing .csv chip trackers and subfolders for hls data and cloud masks.
 
@@ -49,6 +50,8 @@ python -m mae_training --train_dir "/workspace/gfm-gap-filling/pretraining/train
 **--cloud_range** is the lower and upper limits of the ratio of clouds for masks that will be input randomly during training. During validation, the same set of cloud masks are used regardless of inputs for testing consistency across experiments.
 
 **--local_rank** determines which GPU the module will run on. This allows for parallel experiments on machines with multiple GPUs available.
+
+**--mask_position** defines which combinations of time steps will be masked. For example, an input of --mask_position 12 23 123 would cause the training to rotate between masking time step 1 and 2, 2 and 3, and 1, 2, and 3.
 
 **--training_len** defines the number of time series image chips the model will train on. These will be randomly subsampled from the training set.
 
