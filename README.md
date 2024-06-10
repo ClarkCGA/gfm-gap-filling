@@ -1,7 +1,4 @@
-# gfm-gap-filling
-Fine-tuning the GFM model for gap filling task. 
-
-Original pretraining script https://github.com/ClarkCGA/hls-foundation/blob/main/hls/pretraining/mae_training.py
+# Fine-Tuning Prithvi for Cloud Gap Inputation in Time Series of Satellite Images
 
 MAE creation script https://github.com/facebookresearch/mae/blob/main/models_mae.py#
 
@@ -15,7 +12,6 @@ Directories should be structured as follows:
 gfm/
 ├── gfm-gap-filling/
 │ ├── pretraining/
-│ │ ├── training_data/
 │ ├── Dockerfile
 │ ├── .git
 │ ├── README.md
